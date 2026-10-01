@@ -1,0 +1,122 @@
+# hl-news-bot configuration. All money numbers in USDC.
+# mode: paper | live   (live additionally requires HL_AGENT_KEY and HL_ACCOUNT in the environment)
+mode: paper
+
+hyperliquid:
+  network: mainnet            # mainnet | testnet  (paper mode reads mainnet prices either way)
+  unified_account: false      # true if the HL account uses unified account mode (one USDC balance across dexs; 50k actions/day cap)
+  perp_dexs: ["", "xyz"]      # "" = validator perps (BTC/ETH), "xyz" = trade.xyz stock perps
+  market_slippage: 0.003      # IOC limit price offset vs mid (0.3%); SDK default is 5%, far too loose
+  builder: null               # optional {"b": "0x...", "f": 10}
+  poll_prices_s: 2.0          # REST fallback cadence when WS is down
+
+account:
+  equity_usd: 2000            # paper starting equity; in live mode this is read from clearinghouseState
+  max_risk_per_trade_pct: 1.0 # loss at stop as % of equity
+  max_notional_per_trade_usd: 4000
+  max_open_positions: 2
+  max_gross_leverage: 3.0
+  daily_loss_limit_pct: 3.0   # kill switch: stop opening after this day loss
+  weekly_loss_limit_pct: 6.0
+  cooldown_after_loss_s: 900
+  per_coin_cooldown_s: 600
+
+universe:
+  crypto: ["BTC", "ETH"]
+  stocks: ["xyz:TSLA", "xyz:NVDA", "xyz:AAPL", "xyz:MSFT", "xyz:META", "xyz:GOOGL", "xyz:AMZN", "xyz:MU"]
+  ticker_aliases:             # free text -> HL coin
+    bitcoin: BTC
+    btc: BTC
+    ethereum: ETH
+    eth: ETH
+    ether: ETH
+    tesla: xyz:TSLA
+    tsla: xyz:TSLA
+    nvidia: xyz:NVDA
+    nvda: xyz:NVDA
+    apple: xyz:AAPL
+    aapl: xyz:AAPL
+    microsoft: xyz:MSFT
+    msft: xyz:MSFT
+    meta: xyz:META
+    alphabet: xyz:GOOGL
+    google: xyz:GOOGL
+    googl: xyz:GOOGL
+    amazon: xyz:AMZN
+    amzn: xyz:AMZN
+    micron: xyz:MU
+
+feeds:
+  max_age_s: 20               # applies to every live feed: items older than this on arrival are dropped
+  treeofalpha:
+    enabled: true
+    ws_url: wss://news.treeofalpha.com/ws
+    api_key: ""               # optional, free key from news.treeofalpha.com/account
+    max_age_s: 20             # drop anything older than this on arrival
+  telegram:
+    enabled: false            # needs api_id/api_hash + an aged user account; see README
+    api_id: 0
+    api_hash: ""
+    session: hlnews.session
+    channels: ["BWEnews", "CLWfeed", "WatcherGuru"]
+  hl_listings:
+    enabled: true
+    poll_s: 5                 # diff of {"type":"meta"} universe -> LISTING_HL events
+  macro:
+    enabled: true             # BLS schedule + ForexFactory consensus + release-second polling of bls.gov
+  replay:
+    enabled: false
+    path: data/replay.jsonl
+
+classifier:
+  llm:
+    enabled: false            # when false, only the rules lane runs (fully deterministic)
+    provider: anthropic       # anthropic | openai
+    model: claude-haiku-4-5
+    timeout_s: 4.0
+    max_tokens: 200
+    min_confidence: 0.75
+  rules:
+    trusted_accounts:         # twitter handles whose headlines bypass the "two sources" rule
+      - DeItaone
+      - FirstSquawk
+      - WatcherGuru
+      - unusual_whales
+      - CoinbaseMarkets
+      - binance
+      - Upbit_Official
+      - SECGov
+      - federalreserve
+      - BLS_gov
+      - zachxbt
+      - PeckShieldAlert
+      - CertiKAlert
+    require_two_sources_for: ["hack_exploit", "regulatory", "etf", "m_and_a", "tariff", "trump_policy"]
+    corroboration_window_s: 90
+
+# Trade templates per event class. hold_s is the hard time stop. stop/tp are % of entry.
+templates:
+  macro_cpi:      {hold_s: 1800, stop_pct: 0.8,  tp_pct: 1.2,  risk_pct: 0.5,  max_lev: 3, min_conf: 0.8}
+  macro_nfp:      {hold_s: 3600, stop_pct: 0.9,  tp_pct: 1.2,  risk_pct: 0.4,  max_lev: 2, min_conf: 0.8}
+  macro_fomc:     {hold_s: 3600, stop_pct: 1.0,  tp_pct: 1.2,  risk_pct: 0.4,  max_lev: 2, min_conf: 0.8}
+  hack_exploit:   {hold_s: 5400, stop_pct: 1.5,  tp_pct: 2.5,  risk_pct: 0.8,  max_lev: 3, min_conf: 0.8}
+  depeg:          {hold_s: 5400, stop_pct: 1.5,  tp_pct: 2.5,  risk_pct: 0.6,  max_lev: 2, min_conf: 0.85}
+  etf:            {hold_s: 3600, stop_pct: 1.5,  tp_pct: 2.0,  risk_pct: 0.5,  max_lev: 2, min_conf: 0.85}
+  regulatory:     {hold_s: 3600, stop_pct: 1.5,  tp_pct: 2.0,  risk_pct: 0.5,  max_lev: 2, min_conf: 0.85}
+  tariff:         {hold_s: 3600, stop_pct: 1.5,  tp_pct: 2.5,  risk_pct: 0.6,  max_lev: 2, min_conf: 0.8}
+  trump_policy:   {hold_s: 3600, stop_pct: 1.5,  tp_pct: 2.5,  risk_pct: 0.6,  max_lev: 2, min_conf: 0.8}
+  listing_hl:     {hold_s: 600,  stop_pct: 3.0,  tp_pct: 4.0,  risk_pct: 0.3,  max_lev: 2, min_conf: 0.9}
+  earnings:       {hold_s: 7200, stop_pct: 2.0,  tp_pct: 3.0,  risk_pct: 0.6,  max_lev: 3, min_conf: 0.8}
+  guidance:       {hold_s: 7200, stop_pct: 2.0,  tp_pct: 3.0,  risk_pct: 0.6,  max_lev: 3, min_conf: 0.8}
+  # m_and_a: intentionally no template. Rules cannot tell acquirer from target; LLM lane output for this class is logged only.
+
+storage:
+  sqlite_path: data/hlnews.db
+  log_path: data/hlnews.log
+
+# Hyperliquid weekly upgrade: post-only window (observed Fri 08:00-09:30 UTC, Aug-Sep 2026). Flatten 5 min before, no new entries inside.
+maintenance_window:
+  enabled: true
+  weekday_utc: 4
+  start_utc: "07:55"
+  end_utc: "09:35"

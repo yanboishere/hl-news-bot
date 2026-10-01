@@ -1,0 +1,7 @@
+hyperliquid-python-sdk>=0.24.0
+websockets>=12
+pyyaml>=6
+# optional
+# telethon>=1.36      # Telegram user-session feed
+# anthropic>=0.40     # LLM lane (Anthropic)
+# openai>=1.50        # LLM lane (OpenAI-compatible)

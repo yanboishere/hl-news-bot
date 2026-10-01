@@ -1,0 +1,18 @@
+# runtime state
+data/*.db
+data/*.db-*
+data/*.log
+*.session
+*.session-journal
+# secrets
+.env
+.env.*
+secrets/
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+# os
+.DS_Store
