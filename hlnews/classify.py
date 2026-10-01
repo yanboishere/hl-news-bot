@@ -20,9 +20,13 @@ log = logging.getLogger("classify")
 _NUM = r"(-?\d+(?:\.\d+)?)\s*%"
 
 
-def _find_pct(text: str, label_pat: str) -> float | None:
-    """Find 'LABEL ... 3.1%' style numbers. Returns the first percentage after the label."""
-    m = re.search(label_pat + r"[^\d\-]{0,40}" + _NUM, text, flags=re.I)
+def _find_pct(text: str, label_pat: str, max_gap: int = 40) -> float | None:
+    """Find 'LABEL ... 3.1%' style numbers. Returns the first percentage after the label.
+
+    The gap between label and number may not contain digits, '-' or ';' and may not contain the word 'None'
+    (the BLS poller writes 'FORECAST None%' when ForexFactory had no consensus; that must parse as missing,
+    not skip ahead to the next number in the sentence)."""
+    m = re.search(label_pat + r"(?:(?!None)[^\d\-;]){0," + str(max_gap) + r"}" + _NUM, text, flags=re.I)
     return float(m.group(1)) if m else None
 
 
@@ -86,12 +90,12 @@ def classify_rules(item: NewsItem, ctx: RuleContext) -> Classification:
             cons = _find_pct(text, r"(?:FORECAST|EXP(?:ECTED)?|EST\.?|CONSENSUS)")
         core_cons = ctx.core_cpi_consensus
         if core_cons is None and core is not None:
-            m_core = re.search(r"core\s+CPI.*?(?:FORECAST|EXP(?:ECTED)?|EST\.?|CONSENSUS)[^\d\-]{0,10}" + _NUM, text, flags=re.I | re.S)
+            m_core = re.search(r"core\s+CPI.*?(?:FORECAST|EXP(?:ECTED)?|EST\.?|CONSENSUS)(?:(?!None)[^\d\-;]){0,10}" + _NUM, text, flags=re.I | re.S)
             core_cons = float(m_core.group(1)) if m_core else None
         if actual is not None and cons is not None:
-            surprise = actual - cons
-            core_s = (core - core_cons) if (core is not None and core_cons is not None) else 0.0
-            score = surprise + core_s
+            surprise = round(actual - cons, 2)
+            core_s = round(core - core_cons, 2) if (core is not None and core_cons is not None) else 0.0
+            score = round(surprise + core_s, 2)
             if abs(score) >= 0.1:
                 d = Direction.SHORT if score > 0 else Direction.LONG   # hot CPI -> risk off
                 return done(EventClass.MACRO_CPI, d, 0.85, f"CPI actual {actual} vs cons {cons} (core Δ {core_s:+.1f})",
@@ -100,18 +104,22 @@ def classify_rules(item: NewsItem, ctx: RuleContext) -> Classification:
         return done(EventClass.MACRO_CPI, Direction.NONE, 0.3, "CPI mention without parsable number/consensus", ["BTC", "ETH"], sched=True)
 
     if _has(text, r"non-?farm payrolls?", r"\bNFP\b", r"payrolls? (?:rose|fell|increased|decreased|added)"):
-        m = re.search(r"(-?\d{2,3}(?:,\d{3})?|\-?\d+(?:\.\d+)?\s*[kK])", text)
-        if m and ctx.nfp_consensus is not None:
+        m = re.search(r"(?:ACTUAL\s+)?(-?\d{2,3}(?:,\d{3})?|\-?\d+(?:\.\d+)?\s*[kK])", text)
+        cons = ctx.nfp_consensus
+        if cons is None:
+            mc = re.search(r"(?:FORECAST|EXP(?:ECTED)?|EST\.?|CONSENSUS)[^\d\-]{0,10}(-?\d+(?:\.\d+)?)\s*[kK]?", text, flags=re.I)
+            cons = float(mc.group(1)) if mc else None
+        if m and cons is not None:
             s = m.group(1).replace(",", "").lower().replace("k", "")
             try:
                 actual_k = float(s)
             except ValueError:
                 actual_k = None
             if actual_k is not None:
-                surprise = actual_k - ctx.nfp_consensus
+                surprise = actual_k - cons
                 if abs(surprise) >= 50:
                     d = Direction.SHORT if surprise > 0 else Direction.LONG   # strong jobs -> higher for longer -> risk off
-                    return done(EventClass.MACRO_NFP, d, 0.80, f"NFP {actual_k:.0f}k vs cons {ctx.nfp_consensus:.0f}k", ["BTC", "ETH"], sched=True)
+                    return done(EventClass.MACRO_NFP, d, 0.80, f"NFP {actual_k:.0f}k vs cons {cons:.0f}k", ["BTC", "ETH"], sched=True)
                 return done(EventClass.MACRO_NFP, Direction.NONE, 0.5, "NFP in line", ["BTC", "ETH"], sched=True)
         return done(EventClass.MACRO_NFP, Direction.NONE, 0.3, "NFP mention without number/consensus", ["BTC", "ETH"], sched=True)
 
@@ -198,7 +206,7 @@ def classify_rules(item: NewsItem, ctx: RuleContext) -> Classification:
     own_post = (item.account or "").lower() == "realdonaldtrump" or bool((item.raw.get("info") or {}).get("truthId"))
     relay = trusted and _has(text, r"\bTRUMP\b")
     if own_post or relay:
-        if own_post and _has(text, r"\bRT @"):
+        if own_post and re.search(r"^(?:[^:]{0,60}\(@[A-Za-z0-9_]+\):\s*)?RT @", text):  # repost = body starts with "RT @"
             return done(EventClass.TRUMP, Direction.NONE, 0.2, "Trump repost")
         if _has(text, r"\bbitcoin\b", r"\bcrypto", r"\bdigital assets?\b", r"\bstablecoin") and _has(text, r"\breserve\b", r"\bstrategic\b", r"\bexecutive order\b", r"\bsign(?:ed|ing)?\b", r"\bban\b", r"\btax\b"):
             d = Direction.SHORT if _has(text, r"\bban\b", r"\btax\b", r"\bcrack ?down") else Direction.LONG

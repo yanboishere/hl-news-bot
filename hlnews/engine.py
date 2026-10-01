@@ -193,13 +193,17 @@ class Engine:
         rc = classify_rules(item, self.ctx)
         self.store.classification(item.id, rc, now_ms())
         final = rc
-        # LLM lane: only when rules found nothing actionable or are not confident. Runs concurrently with a
-        # price refresh so the book is fresh by the time the LLM answers.
-        if self.llm_cfg.get("enabled") and (rc.event_class is EventClass.NOISE or rc.direction is Direction.NONE or rc.confidence < 0.8):
+        # LLM lane: only when the rules result is not good enough on its own, i.e. noise / no direction / below the
+        # template threshold of its own event class (ETF, regulatory and depeg use 0.85, so even a trusted-source 0.80
+        # goes to the LLM for confirmation). Runs concurrently with a price refresh.
+        need_llm = rc.event_class is EventClass.NOISE or rc.direction is Direction.NONE or rc.confidence < self._min_conf(rc.event_class)
+        if self.llm_cfg.get("enabled") and need_llm:
             lc, _ = await asyncio.gather(classify_llm(item, self.llm_cfg), self.hl.refresh_mids(), return_exceptions=False)
             if lc:
                 self.store.classification(item.id, lc, now_ms())
                 final = self._fuse(rc, lc)
+                if final is not rc and final is not lc:
+                    self.store.classification(item.id, final, now_ms())
         if final.event_class is EventClass.NOISE or final.direction is Direction.NONE or not final.tickers:
             return []
         if final.is_rumor:
@@ -228,15 +232,31 @@ class Engine:
             await self._execute(sig)
         return signals
 
+    def _min_conf(self, ec: EventClass) -> float:
+        t = self.templates.get(ec.value) or {}
+        return float(t.get("min_conf", 0.8))
+
     @staticmethod
     def _fuse(rc: Classification, lc: Classification) -> Classification:
-        """Rules decide when they are confident; otherwise the LLM decides but is capped at 0.85 and
-        must agree with the rules when both have a direction."""
-        if rc.direction is not Direction.NONE and rc.confidence >= 0.8:
-            return rc
+        """Fusion policy.
+
+        1. Rules have a direction and both lanes agree  -> rules result, confidence lifted to max(rules, min(llm, 0.85)).
+           This is the only way a trusted-source 0.80 reaches the 0.85 threshold of ETF/regulatory/depeg.
+        2. Both lanes have a direction and disagree      -> no trade.
+        3. Rules have no direction (noise / none)        -> LLM decides, confidence capped at 0.85, rules' tickers preferred.
+        The LLM can never push confidence above 0.85 and never changes which source the item came from, so the
+        trusted-account / two-source checks downstream are unaffected."""
         if rc.direction is not Direction.NONE and lc.direction is not Direction.NONE and rc.direction != lc.direction:
             return Classification(lane="fused", event_class=rc.event_class, direction=Direction.NONE, confidence=0.0,
-                                  tickers=rc.tickers or lc.tickers, reason=f"lanes disagree: {rc.reason} / {lc.reason}", is_rumor=rc.is_rumor or lc.is_rumor)
+                                  tickers=rc.tickers or lc.tickers, reason=f"lanes disagree: {rc.reason} / {lc.reason}",
+                                  is_rumor=rc.is_rumor or lc.is_rumor, latency_ms=rc.latency_ms + lc.latency_ms)
+        if rc.direction is not Direction.NONE:
+            if lc.direction is Direction.NONE:
+                return rc  # LLM abstained; rules stand on their own
+            conf = max(rc.confidence, min(lc.confidence, 0.85))
+            return Classification(lane="fused", event_class=rc.event_class, direction=rc.direction, confidence=conf, tickers=rc.tickers,
+                                  reason=f"{rc.reason}; llm agrees: {lc.reason}", is_rumor=rc.is_rumor or lc.is_rumor,
+                                  is_scheduled=rc.is_scheduled, magnitude_usd=rc.magnitude_usd, latency_ms=rc.latency_ms + lc.latency_ms)
         conf = min(lc.confidence, 0.85)
         tickers = rc.tickers or lc.tickers
         ec = lc.event_class if rc.event_class is EventClass.NOISE else rc.event_class

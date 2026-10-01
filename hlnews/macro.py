@@ -7,7 +7,7 @@ User-Agent gets the number in ~1-3 s, which is the fastest free path.
 Sources used:
   schedule   : https://www.bls.gov/schedule/news_release/{cpi,empsit}.htm  (parsed once a day)
   consensus  : https://nfs.faireconomy.media/ff_calendar_thisweek.json      (forecast/previous; no 'actual')
-  release    : https://www.bls.gov/news.release/cpi.nr0.htm and empsit.nr0.htm (poll from T-2s to T+15s)
+  release    : https://www.bls.gov/news.release/cpi.nr0.htm and empsit.nr0.htm (poll from T-2s, 0.7 s interval, 20 s window)
   FOMC       : https://www.federalreserve.gov/newsevents/pressreleases/monetary{YYYYMMDD}a.htm
 """
 from __future__ import annotations

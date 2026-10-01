@@ -7,8 +7,7 @@ hyperliquid:
   unified_account: false      # true if the HL account uses unified account mode (one USDC balance across dexs; 50k actions/day cap)
   perp_dexs: ["", "xyz"]      # "" = validator perps (BTC/ETH), "xyz" = trade.xyz stock perps
   market_slippage: 0.003      # IOC limit price offset vs mid (0.3%); SDK default is 5%, far too loose
-  builder: null               # optional {"b": "0x...", "f": 10}
-  poll_prices_s: 2.0          # REST fallback cadence when WS is down
+  poll_prices_s: 2.0          # allMids REST polling interval (the bot does not use the SDK WebSocket)
 
 account:
   equity_usd: 2000            # paper starting equity; in live mode this is read from clearinghouseState
@@ -64,9 +63,6 @@ feeds:
     poll_s: 5                 # diff of {"type":"meta"} universe -> LISTING_HL events
   macro:
     enabled: true             # BLS schedule + ForexFactory consensus + release-second polling of bls.gov
-  replay:
-    enabled: false
-    path: data/replay.jsonl
 
 classifier:
   llm:
