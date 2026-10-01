@@ -91,6 +91,7 @@ class Engine:
         self._day = time.gmtime().tm_yday
         self._week = time.gmtime().tm_yday // 7
         self._order_failures = 0
+        self._last_news_ms = 0
         self.max_age_s = float(cfg["feeds"].get("max_age_s", 20))
         mw = cfg.get("maintenance_window") or {}
         self.mw_enabled = bool(mw.get("enabled", True))
@@ -116,6 +117,7 @@ class Engine:
         tasks.append(asyncio.create_task(self._manage_positions()))
         tasks.append(asyncio.create_task(self.hl.mids_loop(float(self.cfg["hyperliquid"].get("poll_prices_s", 2.0)))))
         tasks.append(asyncio.create_task(self._equity_loop()))
+        tasks.append(asyncio.create_task(self._heartbeat()))
         if self.cfg["feeds"].get("macro", {}).get("enabled"):
             from .macro import MacroScheduler
 
@@ -128,6 +130,48 @@ class Engine:
         finally:
             for t in tasks:
                 t.cancel()
+            self._write_state(stopped=True)
+
+    def _state_path(self) -> str:
+        import os
+
+        return os.path.join(os.path.dirname(self.cfg["storage"]["sqlite_path"]) or ".", "state.json")
+
+    def _write_state(self, stopped: bool = False) -> None:
+        """Small JSON heartbeat for the UI: equity, open positions, halt reason, feed liveness. Written atomically."""
+        import json
+        import os
+
+        st = {
+            "ts_ms": now_ms(),
+            "pid": os.getpid(),
+            "stopped": stopped,
+            "mode": self.mode,
+            "equity_usd": self.state.equity_usd,
+            "day_start_equity": self.state.day_start_equity,
+            "week_start_equity": self.state.week_start_equity,
+            "halted_reason": self.state.halted_reason,
+            "open": [p.to_row() for p in self.state.open],
+            "mids": {p.coin: self.hl.mid(p.coin) for p in self.state.open},
+            "mids_ms": self.hl.mids_ms,
+            "last_news_ms": self._last_news_ms,
+            "queue_size": self.queue.qsize(),
+            "consensus": {"cpi": self.ctx.cpi_consensus, "core_cpi": self.ctx.core_cpi_consensus, "nfp": self.ctx.nfp_consensus, "fomc_bps": self.ctx.fomc_expected_bps},
+        }
+        path = self._state_path()
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(st, f, ensure_ascii=False)
+            os.replace(tmp, path)
+        except Exception as e:  # noqa: BLE001
+            log.debug("state write failed: %s", e)
+
+    async def _heartbeat(self) -> None:
+        while True:
+            self._write_state()
+            await asyncio.sleep(2.0)
 
     def set_consensus(self, kind: str, cons: dict) -> None:
         if kind == "cpi":
@@ -180,6 +224,7 @@ class Engine:
 
     async def handle(self, item: NewsItem) -> list[Signal]:
         self.store.news(item)
+        self._last_news_ms = item.recv_ms
         if item.source != "replay" and item.age_s > self.max_age_s:
             log.debug("stale (%.1fs) %s", item.age_s, item.title[:80])
             return []

@@ -17,3 +17,14 @@ venv/
 .pytest_cache/
 # os
 .DS_Store
+
+# ui / macOS shell
+data/state.json
+data/state.json.tmp
+data/bot.out
+data/ui-server.log
+config.yaml.bak
+macos/.build/
+macos/build/
+.swiftpm/
+data/.fuse_hidden*

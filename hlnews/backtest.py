@@ -83,7 +83,7 @@ def simulate(k: list[list], side: int, entry_delay_s: int, stop_pct: float, tp_p
     return {"ret_pct": (gross - FEE_RT - SLIP_RT) * 100, "exit_reason": reason, "bars": bars, "entry": entry, "exit": exit_px}
 
 
-def run(events: list[dict], templates: dict, delay_s: int, verbose: bool = True) -> dict:
+def run(events: list[dict], templates: dict, delay_s: int, verbose: bool = True, rows_out: list[dict] | None = None) -> dict:
     by_class: dict[str, list[dict]] = {}
     for ev in events:
         coin = ev["coin"]
@@ -100,8 +100,10 @@ def run(events: list[dict], templates: dict, delay_s: int, verbose: bool = True)
             continue
         side = 1 if ev["direction"] == "long" else -1
         res = simulate(k, side, delay_s, float(t["stop_pct"]), t.get("tp_pct"), int(t["hold_s"]), t0)
-        res.update({"coin": coin, "ts": ev["ts_utc"], "note": ev.get("note", ""), "direction": ev["direction"]})
+        res.update({"coin": coin, "ts": ev["ts_utc"], "note": ev.get("note", ""), "direction": ev["direction"], "event_class": ev["event_class"]})
         by_class.setdefault(ev["event_class"], []).append(res)
+        if rows_out is not None:
+            rows_out.append(res)
         if verbose:
             print(f"{ev['ts_utc']} {ev['event_class']:14} {ev['direction']:5} {coin:4} -> {res['ret_pct']:+6.2f}%  {res['exit_reason']:11} {ev.get('note','')[:50]}")
         time.sleep(0.25)

@@ -33,6 +33,7 @@
 11. [怎么改：加新闻源、加事件类、改模板、接 LLM](#11-怎么改加新闻源加事件类改模板接-llm)
 12. [已知限制与未做的事](#12-已知限制与未做的事)
 13. [常见问题](#13-常见问题)
+14. [可视化控制台与 macOS 客户端](#14-可视化控制台与-macos-客户端)
 
 **第二部分：架构设计与可行性结论**
 
@@ -122,6 +123,7 @@ python -m hlnews.run
 ### 第三步：看结果
 
 ```bash
+python -m hlnews.ui            # 浏览器打开 http://127.0.0.1:8765，四个页面；第 14 节有说明
 python -m hlnews.run --summary
 sqlite3 data/hlnews.db "select reason, count(*) from decisions group by reason order by 2 desc"
 ```
@@ -1275,6 +1277,68 @@ trade.xyz 文档：[Oracle price](https://docs.trade.xyz/perpetuals/mechanics/or
 事件报道：[Bybit hack chronology](https://amlcrypto.io/en/blog/event-chronology-bybit-hack) · [CoinDesk, $200M BTC long before reserve post](https://www.coindesk.com/markets/2025/03/03/one-trader-made-millions-betting-usd200m-on-btc-just-before-trump-s-crypto-reserve-news) · [TechCrunch, fake tariff pause tweet](https://techcrunch.com/2025/04/07/how-one-tweet-wreaked-havoc-on-the-stock-market/) · [DOJ, SEC X account hack](https://www.justice.gov/usao-dc/pr/fbi-arrests-alabama-man-january-2024-sec-x-hack-spiked-value-bitcoin) · [Yahoo, House targets Hyperliquid insider trading](https://finance.yahoo.com/markets/crypto/articles/house-targets-hyperliquid-insider-trading-183009740.html)
 
 开源：[wongtp/llmnewsarena](https://github.com/wongtp/llmnewsarena) · [binance/ai-trading-prototype](https://github.com/binance/ai-trading-prototype) · [duckdegen/apebot](https://github.com/duckdegen/apebot) · [nautilus_trader Hyperliquid adapter](https://raw.githubusercontent.com/nautechsystems/nautilus_trader/develop/docs/integrations/hyperliquid.md) · [ccxt hyperliquid](https://raw.githubusercontent.com/ccxt/ccxt/master/python/ccxt/hyperliquid.py)
+
+## 14. 可视化控制台与 macOS 客户端
+
+命令行和 SQLite 够用，但 paper 期间每天要看的东西（最近决策、拒绝原因、延迟、权益）放在一个页面里省事得多。控制台分两层：
+
+- **`hlnews/ui.py`**：一个只绑 127.0.0.1 的本地 HTTP 服务，读 SQLite、`data/state.json`（bot 每 2 秒写一次的心跳）和日志，能启停 bot 子进程、跑回放、跑回测、改 `config.yaml`。前端是一个单文件页面 `hlnews/ui_static/index.html`，无外部依赖。
+- **`macos/`**：一个 SwiftUI 壳，启动时拉起上面的服务并在窗口里用 WKWebView 打开它，退出时先停 bot（会平仓）再停服务。它不含任何业务逻辑，只是让这件事看起来像一个 Mac 应用，并把 `.env` 里的密钥传给 bot 进程。
+
+### 直接用浏览器
+
+```bash
+python -m hlnews.ui            # 打印 http://127.0.0.1:8765
+```
+
+四个页面：
+
+| 页面 | 看什么 | 能做什么 |
+|---|---|---|
+| 总览 | 一句话状态（运行/模式/权益/今日盈亏/最近新闻）、熔断或价格源停更的提示、最近 8 条决策、24 小时权益曲线、持仓及浮动盈亏、按事件类的累计、拒绝原因分布、各新闻源的延迟 | 只读 |
+| 新闻与决策 | 每条新闻一行：先写 bot 的判断（方向、标的、置信），再写新闻。点开看两条车道的理由、模板、风控结论、成交与盈亏 | 过滤、只看有方向的、翻更早的 |
+| 控制与配置 | 进程状态、环境变量是否就绪、日志尾部 | 启停 bot、跑回放、改常用参数（单笔风险、日亏熔断、持仓数、总杠杆、LLM 开关、模式）、改事件模板、改可信账号、编辑整个 config.yaml（保存前校验 YAML，旧文件备份为 `.bak`） |
+| 回测 | 入场延迟扫描、按事件类统计、逐笔 | 选事件文件、设延迟、运行 |
+
+所有写操作只改 `config.yaml`，bot 要重启才生效（页面上会提示）。"启动 bot（纸面）"永远加 `--paper`，不管配置里写什么；"按配置启动"在 `mode: live` 且环境变量缺失时是禁用的。
+
+API 一览（都是 JSON，便于你自己接别的东西）：`GET /api/state /api/summary /api/tape /api/positions /api/equity /api/log /api/config /api/oneshot /api/backtest`，`POST /api/bot/start /api/bot/stop /api/replay /api/backtest /api/config/text /api/config/patch`。
+
+### macOS 应用
+
+需要 macOS 13+ 和 Xcode 命令行工具（`xcode-select --install`）。
+
+```bash
+cd macos
+./build-app.sh              # swift build -c release，然后打包成 build/HLNewsBot.app 并 ad-hoc 签名
+open build/HLNewsBot.app
+```
+
+第一次打开时它会向上查找包含 `config.yaml` 的目录当作仓库（从 `macos/build/` 往上两级正好是仓库根），Python 解释器优先用仓库下的 `.venv/bin/python`。找不到时窗口里会说明，用菜单「服务 › 选择仓库目录 / 选择 Python 解释器」指定；设置在 UserDefaults 里记住。
+
+密钥：把 `HL_AGENT_KEY`、`HL_ACCOUNT`（以及可选的 `ANTHROPIC_API_KEY`）写进仓库根的 `.env`（见 `.env.example`），应用启动服务时读取并传给 bot 进程。`.env` 在 `.gitignore` 里。
+
+退出顺序：关窗口或 Cmd-Q → 应用给 Python 服务发 SIGINT → 服务的 `finally` 给 bot 进程组发 SIGINT → bot 的 `engine.shutdown()` 平掉所有持仓 → 服务退出 → 应用退出。整个过程最多等 20 秒。
+
+也可以不打包：`swift build -c release && .build/release/HLNewsBot`，或者用 Xcode 打开 `macos/Package.swift` 直接运行。Info.plist 已嵌入二进制，所以裸二进制在 macOS 14 的 ATS 下也能连 127.0.0.1。
+
+### 数据流
+
+```mermaid
+flowchart LR
+    APP[HLNewsBot.app<br/>SwiftUI + WKWebView] -->|启动 / SIGINT| UI[python -m hlnews.ui<br/>127.0.0.1:8765]
+    UI -->|Popen / SIGINT| BOT[python -m hlnews.run]
+    BOT -->|写| DB[(data/hlnews.db)]
+    BOT -->|每 2 秒| ST[data/state.json]
+    BOT -->|追加| LOG[data/hlnews.log]
+    UI -->|只读| DB
+    UI -->|读| ST
+    UI -->|读尾部| LOG
+    UI -->|读写| CFG[config.yaml]
+    APP -->|读| ENV[.env]
+```
+
+服务对数据库是只读连接（`mode=ro`），所以它和 bot 不会互相写坏；唯一的互斥是"回放"：它和 bot 写同一个库，所以 bot 在跑时回放按钮是禁用的。
 
 ---
 

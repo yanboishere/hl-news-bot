@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>hl-news-bot 控制台</title>
+<style>
+  :root {
+    color-scheme: light;
+    --paper: #FBFAF7;
+    --ink: #1B1B1A;
+    --ink-2: #55544F;
+    --ink-3: #8A8984;
+    --rule: #DDDAD2;
+    --rule-2: #EEECE6;
+    --accent: #B8321A;
+    --accent-bg: #F8E9E5;
+    --sel: #F1EFE9;
+    --rail: 176px;
+    --serif: "Charter", "Iowan Old Style", "Georgia", "Songti SC", serif;
+    --cjk: "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei";
+    --mono: "SF Mono", "Menlo", "Consolas", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--paper); color: var(--ink); }
+  body { font: 15px/1.5 var(--serif), var(--cjk); font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1, "kern" 1; -webkit-font-smoothing: antialiased; }
+  a { color: inherit; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+  /* layout */
+  .app { display: grid; grid-template-columns: var(--rail) 1fr; min-height: 100vh; }
+  .rail { border-right: 1px solid var(--rule); padding: 28px 0 20px; position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; }
+  .rail .brand { padding: 0 22px 18px; font-size: 15px; }
+  .rail .brand small { display: block; color: var(--ink-3); font-size: 12px; margin-top: 2px; }
+  .rail nav button { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 7px 22px; font-size: 15px; cursor: pointer; color: var(--ink-2); border-left: 2px solid transparent; }
+  .rail nav button:hover { color: var(--ink); }
+  .rail nav button.on { color: var(--ink); border-left-color: var(--ink); }
+  .rail .pulse { margin-top: auto; padding: 16px 22px 0; border-top: 1px solid var(--rule-2); font-size: 13px; color: var(--ink-2); line-height: 1.55; }
+  .rail .pulse b { font-weight: 600; color: var(--ink); }
+  .rail .pulse .warn { color: var(--accent); }
+  main { padding: 30px 40px 60px; max-width: 1180px; }
+  h1 { font-size: 24px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.01em; }
+  h2 { font-size: 18px; font-weight: 600; margin: 34px 0 10px; }
+  h2:first-child { margin-top: 0; }
+  .lede { font-size: 18px; line-height: 1.45; margin: 0 0 20px; max-width: 72ch; }
+  .lede .warn { color: var(--accent); }
+  p { max-width: 72ch; margin: 0 0 12px; color: var(--ink-2); }
+  .quiet { color: var(--ink-3); font-size: 13px; }
+  .alert { border-left: 3px solid var(--accent); background: var(--accent-bg); padding: 10px 14px; margin: 0 0 20px; max-width: 72ch; }
+  .alert b { color: var(--accent); font-weight: 600; }
+
+  /* tables */
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  th { text-align: left; font-weight: 500; color: var(--ink-3); padding: 6px 10px 6px 0; border-bottom: 1px solid var(--rule); font-size: 12.5px; }
+  td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--rule-2); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  td.num, th.num { text-align: right; padding-right: 0; padding-left: 10px; white-space: nowrap; }
+  td.dim { color: var(--ink-3); }
+  .neg { color: var(--ink); }
+  .pos { color: var(--ink); }
+
+  /* the tape */
+  .tape { border-top: 1px solid var(--rule); }
+  .row { display: grid; grid-template-columns: 168px 104px 1fr 56px 190px; gap: 0 14px; padding: 9px 10px; margin: 0 -10px; border-bottom: 1px solid var(--rule-2); cursor: default; align-items: baseline; }
+  .row:hover, .row.open { background: var(--sel); }
+  .row .verdict { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .verdict.none { color: var(--ink-3); font-weight: 400; }
+  .row .cls { color: var(--ink-2); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .head { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .head b { color: var(--ink); font-weight: 500; }
+  .row .age { color: var(--ink-3); font-size: 13px; text-align: right; }
+  .row .out { font-size: 13px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .out.warn { color: var(--accent); }
+  .row.open .head { white-space: normal; }
+  .detail { grid-column: 1 / -1; padding: 8px 0 4px 0; margin-top: 6px; border-top: 1px solid var(--rule-2); font-size: 13px; color: var(--ink-2); line-height: 1.6; }
+  .detail dl { margin: 0; display: grid; grid-template-columns: 84px 1fr; gap: 3px 14px; max-width: 110ch; }
+  .detail dt { color: var(--ink-3); }
+  .detail dd { margin: 0; }
+  .detail .mono { font-family: var(--mono); font-size: 12px; }
+
+  /* controls */
+  .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0 0 14px; }
+  button.act { background: var(--paper); border: 1px solid var(--ink); border-radius: 3px; padding: 6px 14px; cursor: pointer; }
+  button.act:hover { background: var(--ink); color: var(--paper); }
+  button.act:disabled { border-color: var(--rule); color: var(--ink-3); background: var(--paper); cursor: default; }
+  button.lite { background: none; border: 1px solid var(--rule); border-radius: 3px; padding: 5px 12px; cursor: pointer; color: var(--ink-2); font-size: 13.5px; }
+  button.lite:hover { border-color: var(--ink-2); color: var(--ink); }
+  button.lite.on { border-color: var(--ink); color: var(--ink); }
+  input[type=text], input[type=number], select { border: 1px solid var(--rule); border-radius: 3px; padding: 5px 8px; background: #fff; }
+  input[type=number] { width: 90px; }
+  textarea { width: 100%; border: 1px solid var(--rule); border-radius: 3px; padding: 10px 12px; background: #fff; font-family: var(--mono); font-size: 12.5px; line-height: 1.5; resize: vertical; }
+  .note { font-size: 13px; color: var(--ink-3); }
+  .ok { color: var(--ink-2); }
+  .fail { color: var(--accent); }
+  .log { font-family: var(--mono); font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-all; background: #fff; border: 1px solid var(--rule); border-radius: 3px; padding: 10px 12px; max-height: 420px; overflow: auto; color: var(--ink-2); }
+  .log .warn { color: var(--accent); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 40px; }
+  @media (max-width: 1000px) { .grid2 { grid-template-columns: 1fr; } }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; font-size: 14px; }
+  .kv div:nth-child(odd) { color: var(--ink-3); }
+  svg.spark { display: block; width: 100%; height: 72px; }
+  .spark-meta { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--ink-3); margin-top: 4px; }
+  .empty { color: var(--ink-3); padding: 18px 0; }
+  .tmpl input { width: 72px; padding: 3px 6px; border: 1px solid var(--rule-2); background: #fff; border-radius: 2px; text-align: right; }
+  .tmpl input.changed { border-color: var(--ink); }
+  @media (prefers-reduced-motion: no-preference) { button.act, button.lite { transition: background .12s, color .12s, border-color .12s; } }
+  @media (max-width: 760px) {
+    .app { grid-template-columns: 1fr; }
+    .rail { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--rule); }
+    main { padding: 20px; }
+    .row { grid-template-columns: 120px 1fr 56px; }
+    .row .cls, .row .out { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="rail">
+    <div class="brand">hl-news-bot<small id="brandSub">控制台</small></div>
+    <nav>
+      <button data-view="overview" class="on">总览</button>
+      <button data-view="tape">新闻与决策</button>
+      <button data-view="control">控制与配置</button>
+      <button data-view="backtest">回测</button>
+    </nav>
+    <div class="pulse" id="pulse">连接中…</div>
+  </aside>
+  <main id="main"></main>
+</div>
+
+<script>
+// ------------------------------------------------------------------ data layer
+const MOCK = window.__MOCK__ || null;
+async function api(path, body) {
+  if (MOCK) return mockRoute(path, body);
+  const r = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
+  return r.json();
+}
+function mockRoute(path, body) {
+  const p = path.split("?")[0];
+  const m = MOCK[p];
+  if (typeof m === "function") return Promise.resolve(m(path, body));
+  return Promise.resolve(m ?? { ok: true });
+}
+
+// ------------------------------------------------------------------ formatting
+const fmt = {
+  usd(v, sign = false) { if (v == null || isNaN(v)) return "—"; const s = Number(v); const a = Math.abs(s).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); return (s < 0 ? "−" : (sign && s > 0 ? "+" : "")) + a; },
+  px(v) { if (v == null) return "—"; const n = Number(v); return n >= 1000 ? n.toLocaleString("en-US", { maximumFractionDigits: 1 }) : n.toLocaleString("en-US", { maximumFractionDigits: 4 }); },
+  pct(v, d = 2, sign = true) { if (v == null || isNaN(v)) return "—"; const n = Number(v); return (n < 0 ? "−" : (sign && n > 0 ? "+" : "")) + Math.abs(n).toFixed(d) + "%"; },
+  age(ms) { if (ms == null) return "—"; const s = Math.max(0, ms / 1000); if (s < 90) return s.toFixed(s < 10 ? 1 : 0) + " 秒"; if (s < 5400) return Math.round(s / 60) + " 分钟"; if (s < 172800) return (s / 3600).toFixed(1) + " 小时"; return Math.round(s / 86400) + " 天"; },
+  ageS(s) { if (s == null) return "—"; return s < 10 ? s.toFixed(1) + " s" : s < 120 ? Math.round(s) + " s" : Math.round(s / 60) + " m"; },
+  t(ms) { if (!ms) return "—"; const d = new Date(Number(ms)); return d.toLocaleTimeString("zh-CN", { hour12: false }); },
+  dt(ms) { if (!ms) return "—"; const d = new Date(Number(ms)); return d.toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }); },
+  dur(s) { if (s == null) return "—"; s = Math.round(s); if (s < 60) return s + " 秒"; if (s < 3600) return Math.round(s / 60) + " 分钟"; return (s / 3600).toFixed(1) + " 小时"; },
+  dir(d) { return d === "long" ? "▲ 多" : d === "short" ? "▼ 空" : "—"; },
+  cls(c) { return CLASS_ZH[c] || c || "—"; },
+  esc(s) { return String(s ?? "").replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch])); },
+};
+const CLASS_ZH = {
+  macro_cpi: "CPI", macro_nfp: "非农", macro_fomc: "FOMC", listing_binance: "币安上币", listing_upbit: "Upbit 上币", listing_coinbase: "Coinbase 上币",
+  listing_hl: "HL 新上币", hack_exploit: "黑客 / exploit", depeg: "脱锚", etf: "ETF", regulatory: "监管", tariff: "关税", trump_policy: "特朗普政策",
+  earnings: "财报", guidance: "指引", m_and_a: "并购", noise: "噪音",
+};
+const EXIT_ZH = { stop: "止损", take_profit: "止盈", time_stop: "时间止损", pre_maintenance: "维护窗口前平仓", shutdown: "进程退出平仓" };
+
+// ------------------------------------------------------------------ state
+const S = { view: "overview", state: null, bot: null, summary: null, tape: [], tapeDirectional: false, tapeQuery: "", expanded: new Set(), equity: [], openPos: [], closedPos: [], log: [], logGrep: "", logAuto: true, cfg: null, cfgText: "", oneshot: null, bt: null, tmplEdits: {} };
+const $ = sel => document.querySelector(sel);
+const main = $("#main");
+
+document.querySelectorAll(".rail nav button").forEach(b => b.addEventListener("click", () => { S.view = b.dataset.view; document.querySelectorAll(".rail nav button").forEach(x => x.classList.toggle("on", x === b)); render(); refreshView(); }));
+
+async function refreshState() {
+  try { const r = await api("/api/state"); S.state = r.state; S.bot = r.bot; renderPulse(); if (S.view === "overview" || S.view === "control") renderStatusOnly(); } catch (e) { $("#pulse").innerHTML = `<span class="warn">连不上本地服务。</span><br>在仓库目录运行 <b>python -m hlnews.ui</b>`; }
+}
+async function refreshView() {
+  if (S.view === "overview") { const [s, t, e, o] = await Promise.all([api("/api/summary"), api("/api/tape?limit=8"), api("/api/equity?hours=24"), api("/api/positions?status=open")]); S.summary = s; S.tape = t; S.equity = e; S.openPos = o; render(); }
+  else if (S.view === "tape") { S.tape = await api(`/api/tape?limit=150&directional=${S.tapeDirectional ? 1 : 0}`); render(); }
+  else if (S.view === "control") { const [c, l, os] = await Promise.all([api("/api/config"), api(`/api/log?lines=200&grep=${encodeURIComponent(S.logGrep)}`), api("/api/oneshot")]); S.cfg = c.parsed; S.cfgText = c.text; S.log = l; S.oneshot = os; render(); }
+  else if (S.view === "backtest") { S.bt = await api("/api/backtest"); render(); }
+}
+setInterval(refreshState, 2000);
+setInterval(() => { if (S.view === "overview") refreshView(); if (S.view === "tape") refreshView(); if (S.view === "control" && S.logAuto) refreshLog(); if (S.view === "backtest" && S.bt && S.bt.running) refreshView(); }, 5000);
+async function refreshLog() { S.log = await api(`/api/log?lines=200&grep=${encodeURIComponent(S.logGrep)}`); const el = $("#log"); if (el) { el.innerHTML = renderLogLines(); el.scrollTop = el.scrollHeight; } const os = await api("/api/oneshot"); S.oneshot = os; const oe = $("#oneshotOut"); if (oe) oe.textContent = (os.output || "").split("\n").slice(-40).join("\n"); }
+
+// ------------------------------------------------------------------ pulse (rail bottom)
+function liveness() {
+  const st = S.state || {}, bot = S.bot || {};
+  const running = bot.running || st.alive;
+  const halted = st.halted_reason;
+  const stale = running && st.mids_ms && (Date.now() - st.mids_ms > 15000);
+  const quiet = running && st.last_news_ms && (Date.now() - st.last_news_ms > 1800_000);
+  return { running, halted, stale, quiet, mode: st.mode || (S.cfg && S.cfg.mode) || "paper" };
+}
+function renderPulse() {
+  const st = S.state || {}; const L = liveness();
+  const eq = st.equity_usd, day0 = st.day_start_equity;
+  const dayPnl = (eq != null && day0 != null) ? eq - day0 : null;
+  const lines = [];
+  lines.push(L.running ? `<b>运行中</b> · ${L.mode === "live" ? "实盘" : "纸面"}` : `<b>已停止</b>`);
+  if (eq != null) lines.push(`权益 <b>${fmt.usd(eq)}</b>${dayPnl != null ? `，今日 ${fmt.usd(dayPnl, true)}` : ""}`);
+  if (L.running) lines.push(`最近新闻 ${st.last_news_ms ? fmt.age(Date.now() - st.last_news_ms) + "前" : "还没有"}`);
+  if (L.halted) lines.push(`<span class="warn">熔断：${fmt.esc(L.halted)}</span>`);
+  if (L.stale) lines.push(`<span class="warn">价格已 ${fmt.age(Date.now() - st.mids_ms)}未更新</span>`);
+  if (st.open && st.open.length) lines.push(`持仓 ${st.open.length} 笔`);
+  $("#pulse").innerHTML = lines.join("<br>");
+  $("#brandSub").textContent = L.mode === "live" ? "实盘账户" : "纸面模拟";
+}
+function renderStatusOnly() { const el = $("#statusLede"); if (el) el.outerHTML = statusLede(); const al = $("#statusAlert"); if (al) al.outerHTML = statusAlert(); }
+
+// ------------------------------------------------------------------ overview
+function statusLede() {
+  const st = S.state || {}; const L = liveness(); const bot = S.bot || {};
+  const parts = [];
+  if (!L.running) parts.push("bot 没有在运行。");
+  else {
+    parts.push(`bot 在${L.mode === "live" ? "实盘" : "纸面"}模式运行${bot.started_ms ? "，已持续 " + fmt.age(Date.now() - bot.started_ms) : ""}。`);
+    parts.push(`权益 ${fmt.usd(st.equity_usd)} USDC，今日 ${fmt.usd((st.equity_usd ?? 0) - (st.day_start_equity ?? 0), true)}。`);
+    parts.push(st.last_news_ms ? `最近一条新闻在 ${fmt.age(Date.now() - st.last_news_ms)}前到达。` : "还没有新闻进来。");
+    parts.push(st.open && st.open.length ? `${st.open.length} 笔持仓。` : "没有持仓。");
+  }
+  return `<p class="lede" id="statusLede">${parts.join(" ")}</p>`;
+}
+function statusAlert() {
+  const L = liveness(); const st = S.state || {};
+  let msg = "";
+  if (L.halted) msg = `<b>已熔断。</b>原因：${fmt.esc(L.halted)}。日亏熔断到 UTC 零点自动解除；连续下单失败的熔断需要重启 bot。`;
+  else if (L.stale) msg = `<b>价格源停了。</b>allMids 已 ${fmt.age(Date.now() - st.mids_ms)}未更新，新信号会被拒绝（stale/no price），已有持仓只剩交易所侧止损。看日志里有没有 allMids failed。`;
+  else if (!L.running && st.ts_ms && !st.stopped) msg = `<b>bot 心跳停止。</b>state.json 最后更新于 ${fmt.dt(st.ts_ms)}，进程可能已崩溃。到「控制与配置」看日志尾部。`;
+  return msg ? `<div class="alert" id="statusAlert">${msg}</div>` : `<span id="statusAlert"></span>`;
+}
+function sparkline(rows) {
+  if (!rows || rows.length < 2) return `<div class="empty">权益曲线每分钟记一个点，bot 跑起来几分钟后出现。</div>`;
+  const W = 1000, H = 72, pad = 2;
+  const ys = rows.map(r => r.equity_usd), xs = rows.map(r => r.ts_ms);
+  const minY = Math.min(...ys), maxY = Math.max(...ys), minX = xs[0], maxX = xs[xs.length - 1];
+  const sy = v => maxY === minY ? H / 2 : pad + (H - 2 * pad) * (1 - (v - minY) / (maxY - minY));
+  const sx = v => maxX === minX ? 0 : (W) * (v - minX) / (maxX - minX);
+  const d = rows.map((r, i) => (i ? "L" : "M") + sx(r.ts_ms).toFixed(1) + " " + sy(r.equity_usd).toFixed(1)).join(" ");
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="24 小时权益曲线"><path d="${d}" fill="none" stroke="#1B1B1A" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>
+  <div class="spark-meta"><span>${fmt.dt(minX)}　最低 ${fmt.usd(minY)}</span><span>最高 ${fmt.usd(maxY)}　${fmt.dt(maxX)}</span></div>`;
+}
+function tapeRow(r, compact) {
+  const v = r.verdict || {}; const dir = v.direction; const none = !dir || dir === "none";
+  const coins = (r.signals && r.signals.length) ? [...new Set(r.signals.map(s => s.coin))].join(" ") : ((v.event_class && v.event_class !== "noise" && r.classifications && r.classifications.length) ? (r.classifications[r.classifications.length - 1].tickers || []).join(" ") : "");
+  const verdict = none ? `<span class="verdict none">—</span>` : `<span class="verdict">${fmt.dir(dir)} ${fmt.esc(coins)}<span class="quiet"> ${v.confidence != null ? Number(v.confidence).toFixed(2) : ""}</span></span>`;
+  const who = r.account ? `<b>${fmt.esc(r.account)}</b> ` : (r.channel ? `<b>${fmt.esc(r.channel)}</b> ` : "");
+  const title = fmt.esc(r.title.replace(/^[^:]{0,60}\(@[A-Za-z0-9_]+\):\s*/, ""));
+  const warn = /风控拒绝|谣言/.test(v.outcome || "");
+  const open = S.expanded.has(r.id);
+  return `<div class="row ${open ? "open" : ""}" data-id="${r.id}">
+    ${verdict}
+    <span class="cls" title="${fmt.esc(v.event_class || "")}">${none && v.event_class === "noise" ? "" : fmt.cls(v.event_class)}</span>
+    <span class="head" title="${fmt.esc(r.title)}">${who}${title}</span>
+    <span class="age" title="源时间戳到本机接收的延迟">${fmt.ageS(r.age_s)}</span>
+    <span class="out ${warn ? "warn" : ""}">${fmt.esc(v.outcome || "")}</span>
+    ${open ? tapeDetail(r) : ""}
+  </div>`;
+}
+function tapeDetail(r) {
+  const cl = (r.classifications || []).map(c => `<div>${c.lane} 车道：<b>${fmt.cls(c.event_class)}</b> ${fmt.dir(c.direction)} 置信 ${Number(c.confidence).toFixed(2)}${c.is_rumor ? " · 谣言词" : ""} · ${fmt.esc(c.reason)} <span class="quiet">(${c.latency_ms} ms)</span></div>`).join("");
+  const sg = (r.signals || []).map(s => {
+    const t = s.template || {}; const d = (s.decisions || []).map(x => x.accepted ? "风控通过" : `风控拒绝：${fmt.esc(x.reason)}`).join("；");
+    const p = s.position;
+    const pos = p ? `开仓 ${fmt.px(p.entry_px)} × ${p.size}（名义 ${fmt.usd(p.notional_usd)}，滑点 ${Number(p.slippage_bps).toFixed(1)} bps）` + (p.exit_ms ? `，${EXIT_ZH[p.exit_reason] || p.exit_reason} @ ${fmt.px(p.exit_px)}，盈亏 ${fmt.usd(p.pnl_usd, true)}（含费 ${fmt.usd(p.fee_usd)}）` : "，持仓中") : "";
+    return `<div><b>${s.coin}</b> ${fmt.dir(s.direction)}，模板 ${fmt.cls(s.event_class)}：持有 ${fmt.dur(t.hold_s)}，止损 ${t.stop_pct}%，止盈 ${t.tp_pct}%，风险 ${t.risk_pct}%，杠杆上限 ${t.max_lev}x，门槛 ${t.min_conf}。${d} ${pos}</div>`;
+  }).join("");
+  return `<div class="detail">
+    <dl>
+      <dt>来源</dt><dd>${fmt.esc(r.source)} / ${fmt.esc(r.channel)}${r.account ? " / @" + fmt.esc(r.account) : ""} · 源时间 ${fmt.dt(r.ts_ms)} · 接收 ${fmt.dt(r.recv_ms)}${r.url ? ` · <a href="${fmt.esc(r.url)}" target="_blank" rel="noopener">原文</a>` : ""}</dd>
+      <dt>全文</dt><dd>${fmt.esc(r.title)}</dd>
+      <dt>源提示币种</dt><dd>${(r.suggestions || []).join(" ") || "无"}</dd>
+      <dt>分类</dt><dd>${cl || "无"}</dd>
+      <dt>信号</dt><dd>${sg || "无。噪音、无方向、谣言或未通过二源佐证的新闻不产生信号。"}</dd>
+      <dt>id</dt><dd class="mono">${fmt.esc(r.id)}</dd>
+    </dl></div>`;
+}
+function viewOverview() {
+  const s = S.summary || {}; const td = s.today || {}; const all = s.all || {};
+  const openRows = (S.openPos || []).map(p => {
+    const mid = (S.state && S.state.mids && S.state.mids[p.coin]) || null;
+    const upnl = mid ? (p.direction === "long" ? 1 : -1) * (mid - p.entry_px) * p.size : null;
+    const left = (p.time_exit_ms - Date.now()) / 1000;
+    return `<tr><td>${p.coin}</td><td>${fmt.dir(p.direction)}</td><td>${fmt.cls(p.event_class)}</td><td class="num">${fmt.px(p.entry_px)}</td><td class="num">${mid ? fmt.px(mid) : "—"}</td><td class="num">${upnl != null ? fmt.usd(upnl, true) : "—"}</td><td class="num">${fmt.px(p.stop_px)}</td><td class="num">${p.tp_px ? fmt.px(p.tp_px) : "—"}</td><td class="num">${left > 0 ? fmt.dur(left) : "到期"}</td></tr>`;
+  }).join("");
+  const byClass = (s.by_class || []).map(r => `<tr><td>${fmt.cls(r.event_class)}</td><td class="num">${r.n}</td><td class="num">${r.n ? Math.round(100 * r.wins / r.n) + "%" : "—"}</td><td class="num">${fmt.usd(r.pnl, true)}</td><td class="num dim">${r.stops} / ${r.tps} / ${r.times}</td></tr>`).join("");
+  const rej = (s.rejections || []).map(r => `<tr><td>${fmt.esc(r.reason)}</td><td class="num">${r.n}</td></tr>`).join("");
+  const src = (s.sources || []).map(r => `<tr><td>${fmt.esc(r.channel)}</td><td class="num">${r.n}</td><td class="num">${r.avg_age != null ? r.avg_age.toFixed(2) + " s" : "—"}</td><td class="num dim">${r.max_age != null ? r.max_age + " s" : "—"}</td></tr>`).join("");
+  return `
+    <h1>总览</h1>
+    ${statusLede()}
+    ${statusAlert()}
+    ${s.empty ? `<p>数据库还不存在。启动 bot 或跑一次回放之后这里会有内容。</p>` : ""}
+
+    <h2>最近决策</h2>
+    <div class="tape">${(S.tape || []).map(r => tapeRow(r, true)).join("") || `<div class="empty">还没有新闻进来。bot 启动后几分钟内会出现第一条，大部分会是「噪音」。</div>`}</div>
+    <p class="quiet" style="margin-top:8px">今日 ${td.news ?? 0} 条新闻，${td.directional ?? 0} 条有方向，${td.signals ?? 0} 个信号，${td.accepted ?? 0} 次通过风控，${td.closed ?? 0} 笔平仓，盈亏 ${fmt.usd(td.pnl, true)}。累计 ${all.closed ?? 0} 笔，胜 ${all.wins ?? 0}，盈亏 ${fmt.usd(all.pnl, true)}，手续费 ${fmt.usd(all.fees)}。</p>
+
+    <h2>权益，最近 24 小时</h2>
+    ${sparkline(S.equity)}
+
+    ${openRows ? `<h2>持仓</h2><table><thead><tr><th>标的</th><th>方向</th><th>事件</th><th class="num">开仓价</th><th class="num">现价</th><th class="num">浮动盈亏</th><th class="num">止损</th><th class="num">止盈</th><th class="num">距时间止损</th></tr></thead><tbody>${openRows}</tbody></table>` : ""}
+
+    <div class="grid2">
+      <div>
+        <h2>按事件类，累计</h2>
+        ${byClass ? `<table><thead><tr><th>事件</th><th class="num">笔数</th><th class="num">胜率</th><th class="num">盈亏</th><th class="num">止损 / 止盈 / 到时</th></tr></thead><tbody>${byClass}</tbody></table>` : `<div class="empty">还没有平仓记录。</div>`}
+        <h2>风控拒绝原因，累计</h2>
+        ${rej ? `<table><thead><tr><th>原因</th><th class="num">次数</th></tr></thead><tbody>${rej}</tbody></table>` : `<div class="empty">还没有被拒绝的信号。</div>`}
+      </div>
+      <div>
+        <h2>新闻来源，最近 24 小时</h2>
+        ${src ? `<table><thead><tr><th>来源</th><th class="num">条数</th><th class="num">平均延迟</th><th class="num">最大延迟</th></tr></thead><tbody>${src}</tbody></table>` : `<div class="empty">最近 24 小时没有新闻记录。</div>`}
+        <p class="quiet" style="margin-top:10px">延迟 = 源时间戳到本机接收。Tree of Alpha 推特正常在 0.5–2 秒；回放的新闻这个数没有意义。</p>
+      </div>
+    </div>`;
+}
+
+// ------------------------------------------------------------------ tape view
+function viewTape() {
+  const q = S.tapeQuery.trim().toLowerCase();
+  const rows = (S.tape || []).filter(r => !q || (r.title + " " + (r.account || "") + " " + (r.verdict?.event_class || "") + " " + (r.verdict?.outcome || "")).toLowerCase().includes(q));
+  return `
+    <h1>新闻与决策</h1>
+    <p>每一行先写 bot 的判断，再写新闻本身。点一行展开两条车道的分类理由、信号模板、风控结论和成交。</p>
+    <div class="bar">
+      <button class="lite ${S.tapeDirectional ? "" : "on"}" id="tAll">全部</button>
+      <button class="lite ${S.tapeDirectional ? "on" : ""}" id="tDir">只看有方向的</button>
+      <input type="text" id="tQ" placeholder="过滤标题、账号、事件类" value="${fmt.esc(S.tapeQuery)}" style="min-width:260px">
+      <span class="quiet">${rows.length} 条</span>
+    </div>
+    <div class="tape" id="tapeList">${rows.map(r => tapeRow(r)).join("") || `<div class="empty">${S.tape && S.tape.length ? "没有匹配的行。" : "还没有新闻进来。"}</div>`}</div>
+    <div class="bar" style="margin-top:14px"><button class="lite" id="tMore">加载更早的 150 条</button></div>`;
+}
+
+// ------------------------------------------------------------------ control view
+function renderLogLines() { return (S.log || []).map(l => { const w = /WARNING|ERROR|HALTED|Traceback/.test(l); return `<div class="${w ? "warn" : ""}">${fmt.esc(l)}</div>`; }).join("") || `<div class="quiet">日志为空。</div>`; }
+function templateTable() {
+  const t = (S.cfg && S.cfg.templates) || {};
+  const fields = ["hold_s", "stop_pct", "tp_pct", "risk_pct", "max_lev", "min_conf"];
+  const head = `<tr><th>事件</th><th class="num">持有(秒)</th><th class="num">止损%</th><th class="num">止盈%</th><th class="num">风险%</th><th class="num">杠杆上限</th><th class="num">置信门槛</th></tr>`;
+  const rows = Object.entries(t).map(([k, v]) => `<tr><td>${fmt.cls(k)} <span class="quiet">${k}</span></td>${fields.map(f => `<td class="num"><input data-cls="${k}" data-field="${f}" value="${v[f] ?? ""}" class="${S.tmplEdits[k + "." + f] != null ? "changed" : ""}"></td>`).join("")}</tr>`).join("");
+  return `<table class="tmpl"><thead>${head}</thead><tbody>${rows}</tbody></table>`;
+}
+function viewControl() {
+  const bot = S.bot || {}; const st = S.state || {}; const cfg = S.cfg || {}; const acct = cfg.account || {}; const llm = (cfg.classifier || {}).llm || {}; const env = bot.env || {};
+  const liveOk = env.HL_AGENT_KEY && env.HL_ACCOUNT;
+  const trusted = (((cfg.classifier || {}).rules || {}).trusted_accounts || []).join("\n");
+  const os = S.oneshot || {};
+  return `
+    <h1>控制与配置</h1>
+    <p>bot 启动时读一次 config.yaml，之后的修改要重启才生效。这里的每个保存按钮都只改文件。</p>
+
+    <h2>进程</h2>
+    <div class="kv">
+      <div>状态</div><div>${bot.running ? `运行中，pid ${bot.pid}，自 ${fmt.dt(bot.started_ms)}` : (st.alive ? "运行中（不是由本控制台启动的进程）" : "已停止")}</div>
+      <div>模式</div><div>${cfg.mode === "live" ? "实盘" : "纸面"}${cfg.mode === "live" && !liveOk ? `<span class="fail">，但缺少 HL_AGENT_KEY / HL_ACCOUNT 环境变量，启动会失败</span>` : ""}</div>
+      <div>环境变量</div><div>HL_AGENT_KEY ${env.HL_AGENT_KEY ? "已设置" : "未设置"} · HL_ACCOUNT ${env.HL_ACCOUNT ? "已设置" : "未设置"} · ANTHROPIC_API_KEY ${env.ANTHROPIC_API_KEY ? "已设置" : "未设置"}</div>
+      <div>解释器</div><div class="quiet">${fmt.esc(bot.python || "")}</div>
+      <div>仓库</div><div class="quiet">${fmt.esc(bot.repo || "")}</div>
+    </div>
+    <div class="bar" style="margin-top:14px">
+      <button class="act" id="btnStart" ${bot.running ? "disabled" : ""}>启动 bot（纸面）</button>
+      <button class="act" id="btnStartCfg" ${bot.running || (cfg.mode === "live" && !liveOk) ? "disabled" : ""} title="按 config.yaml 的 mode 启动">启动 bot（按配置：${cfg.mode === "live" ? "实盘" : "纸面"}）</button>
+      <button class="act" id="btnStop" ${bot.running ? "" : "disabled"}>停止 bot</button>
+      <span class="note">停止会先平掉所有持仓再退出。</span>
+    </div>
+
+    <h2>回放样本</h2>
+    <div class="bar">
+      <button class="act" id="btnReplay" ${bot.running || (os.running) ? "disabled" : ""}>回放 data/replay.jsonl，15 秒</button>
+      <span class="note">${bot.running ? "先停止 bot，回放和 bot 写同一个数据库。" : "14 条历史标题过一遍完整管线，用当前真实价格做纸面成交。"}</span>
+    </div>
+    ${os.kind ? `<div class="log" id="oneshotOut">${fmt.esc((os.output || "").split("\n").slice(-40).join("\n"))}</div>` : ""}
+
+    <h2>常用参数</h2>
+    <div class="bar">
+      <label>单笔最大风险 % <input type="number" step="0.1" min="0.1" max="5" id="qRisk" value="${acct.max_risk_per_trade_pct ?? ""}"></label>
+      <label>日亏熔断 % <input type="number" step="0.5" min="0.5" max="20" id="qDay" value="${acct.daily_loss_limit_pct ?? ""}"></label>
+      <label>最多持仓 <input type="number" step="1" min="1" max="10" id="qOpen" value="${acct.max_open_positions ?? ""}"></label>
+      <label>总杠杆上限 <input type="number" step="0.5" min="1" max="10" id="qGross" value="${acct.max_gross_leverage ?? ""}"></label>
+      <label><input type="checkbox" id="qLlm" ${llm.enabled ? "checked" : ""}> 启用 LLM 慢车道</label>
+      <label>模式 <select id="qMode"><option value="paper" ${cfg.mode !== "live" ? "selected" : ""}>纸面</option><option value="live" ${cfg.mode === "live" ? "selected" : ""} ${liveOk ? "" : "disabled"}>实盘${liveOk ? "" : "（缺少环境变量）"}</option></select></label>
+      <button class="act" id="qSave">保存常用参数</button>
+      <span class="note" id="qMsg"></span>
+    </div>
+
+    <h2>事件模板</h2>
+    <p class="quiet">改完按保存。持有时间单位秒；止损/止盈/风险是百分比；置信门槛 0–1。</p>
+    ${templateTable()}
+    <div class="bar" style="margin-top:10px"><button class="act" id="tmplSave">保存模板</button><span class="note" id="tmplMsg"></span></div>
+
+    <h2>可信账号</h2>
+    <p class="quiet">一行一个推特账号名。加入意味着：该账号的规则命中置信升到 0.80，且免二源佐证。只加从不发假消息的账号。</p>
+    <textarea id="trusted" rows="8">${fmt.esc(trusted)}</textarea>
+    <div class="bar" style="margin-top:8px"><button class="act" id="trustedSave">保存可信账号</button><span class="note" id="trustedMsg"></span></div>
+
+    <h2>完整 config.yaml</h2>
+    <textarea id="cfgText" rows="22">${fmt.esc(S.cfgText || "")}</textarea>
+    <div class="bar" style="margin-top:8px"><button class="act" id="cfgSave">保存整个文件</button><span class="note" id="cfgMsg">保存前会校验 YAML，并把旧文件备份为 config.yaml.bak。</span></div>
+
+    <h2>日志尾部</h2>
+    <div class="bar">
+      <input type="text" id="logGrep" placeholder="过滤，如 OPEN、REJECT、WARNING" value="${fmt.esc(S.logGrep)}" style="min-width:260px">
+      <button class="lite ${S.logAuto ? "on" : ""}" id="logAuto">自动刷新</button>
+      <button class="lite" id="logNow">刷新</button>
+    </div>
+    <div class="log" id="log">${renderLogLines()}</div>`;
+}
+
+// ------------------------------------------------------------------ backtest view
+function viewBacktest() {
+  const bt = S.bt || {}; const r = bt.result;
+  let res = "";
+  if (bt.running) res = `<p>回测进行中（自 ${fmt.t(bt.started_ms)}）。每个事件拉一次 Binance 1 分钟 K，45 个事件约 1–2 分钟；延迟扫描要乘以 5。</p>`;
+  else if (bt.error) res = `<div class="alert"><b>回测失败。</b>${fmt.esc(bt.error)}</div>`;
+  else if (r) {
+    const sweep = r.sweep ? `<h2>入场延迟扫描</h2><table><thead><tr><th class="num">延迟</th><th class="num">笔数</th><th class="num">胜率</th><th class="num">均值</th><th class="num">中位</th></tr></thead><tbody>${r.sweep.map(x => `<tr><td class="num">${x.delay_s} 秒</td><td class="num">${x.n ?? "—"}</td><td class="num">${x.win_rate != null ? Math.round(100 * x.win_rate) + "%" : "—"}</td><td class="num">${fmt.pct(x.mean_pct)}</td><td class="num">${fmt.pct(x.median_pct)}</td></tr>`).join("")}</tbody></table>` : "";
+    const bc = Object.entries(r.by_class || {}).map(([k, v]) => `<tr><td>${fmt.cls(k)}</td><td class="num">${v.n}</td><td class="num">${Math.round(100 * v.win_rate)}%</td><td class="num">${fmt.pct(v.mean_pct)}</td><td class="num">${fmt.pct(v.median_pct)}</td><td class="num">${v.sum_R.toFixed(2)}</td><td class="num">${Math.round(100 * v.breakeven_win_rate_if_tp_or_stop)}%</td><td class="num dim">${v.exits.stop} / ${v.exits.take_profit} / ${v.exits.time_stop}</td></tr>`).join("");
+    const rows = (r.rows || []).map(x => `<tr><td class="dim">${fmt.esc(x.ts.replace("T", " ").replace("Z", ""))}</td><td>${fmt.cls(x.event_class)}</td><td>${x.coin}</td><td>${fmt.dir(x.direction)}</td><td class="num">${fmt.pct(x.ret_pct)}</td><td style="padding-left:14px">${EXIT_ZH[x.exit_reason] || x.exit_reason}</td><td class="dim">${fmt.esc(x.note || "")}</td></tr>`).join("");
+    res = `
+      <p>入场延迟 ${r.delay_s} 秒，${r.n_events} 个事件，${r.all.n ?? 0} 笔有数据。总胜率 ${r.all.win_rate != null ? Math.round(100 * r.all.win_rate) + "%" : "—"}，每笔均值 ${fmt.pct(r.all.mean_pct)}，中位 ${fmt.pct(r.all.median_pct)}。已扣 0.09% 往返手续费和 0.04% 往返滑点。</p>
+      ${sweep}
+      <h2>按事件类</h2>
+      <table><thead><tr><th>事件</th><th class="num">笔数</th><th class="num">胜率</th><th class="num">均值</th><th class="num">中位</th><th class="num">合计 R</th><th class="num">盈亏平衡胜率</th><th class="num">止损 / 止盈 / 到时</th></tr></thead><tbody>${bc}</tbody></table>
+      <p class="quiet" style="margin-top:8px">盈亏平衡胜率 = 止损 ÷ (止损 + 止盈)，假设每笔要么止盈要么止损。合计 R 以止损距离为 1。</p>
+      <h2>逐笔</h2>
+      <table><thead><tr><th>时间 (UTC)</th><th>事件</th><th>标的</th><th>方向</th><th class="num">收益</th><th style="padding-left:14px">退出</th><th>备注</th></tr></thead><tbody>${rows}</tbody></table>`;
+  } else res = `<div class="empty">还没有跑过回测。</div>`;
+  return `
+    <h1>回测</h1>
+    <p>按当前 config.yaml 的模板，对历史事件用 Binance 1 分钟 K 线模拟进场、止损、止盈、时间止损。事件的方向是事后给定的，所以这里测的是模板参数对入场延迟的敏感性，不是胜率；胜率只能从纸面和实盘样本里来。</p>
+    <div class="bar">
+      <label>事件文件 <input type="text" id="btEvents" value="data/events.jsonl" style="min-width:220px"></label>
+      <label>入场延迟（秒） <input type="number" id="btDelay" value="20" min="0" max="900" step="5"></label>
+      <label><input type="checkbox" id="btSweep"> 同时做 5 / 20 / 60 / 180 / 300 秒扫描</label>
+      <button class="act" id="btRun" ${bt.running ? "disabled" : ""}>运行回测</button>
+    </div>
+    ${res}`;
+}
+
+// ------------------------------------------------------------------ render + events
+function render() {
+  main.innerHTML = S.view === "overview" ? viewOverview() : S.view === "tape" ? viewTape() : S.view === "control" ? viewControl() : viewBacktest();
+  bind();
+}
+function toast(sel, msg, ok = true) { const el = $(sel); if (el) { el.textContent = msg; el.className = "note " + (ok ? "ok" : "fail"); } }
+function bind() {
+  document.querySelectorAll(".row").forEach(el => el.addEventListener("click", e => { if (e.target.tagName === "A") return; const id = el.dataset.id; if (S.expanded.has(id)) S.expanded.delete(id); else S.expanded.add(id); render(); }));
+  const on = (sel, ev, fn) => { const el = $(sel); if (el) el.addEventListener(ev, fn); };
+  on("#tAll", "click", () => { S.tapeDirectional = false; refreshView(); });
+  on("#tDir", "click", () => { S.tapeDirectional = true; refreshView(); });
+  on("#tQ", "input", e => { S.tapeQuery = e.target.value; const list = $("#tapeList"); if (list) { const q = S.tapeQuery.trim().toLowerCase(); const rows = (S.tape || []).filter(r => !q || (r.title + " " + (r.account || "") + " " + (r.verdict?.event_class || "") + " " + (r.verdict?.outcome || "")).toLowerCase().includes(q)); list.innerHTML = rows.map(r => tapeRow(r)).join("") || `<div class="empty">没有匹配的行。</div>`; bind(); } });
+  on("#tMore", "click", async () => { const last = S.tape[S.tape.length - 1]; if (!last) return; const more = await api(`/api/tape?limit=150&directional=${S.tapeDirectional ? 1 : 0}&before_ms=${last.recv_ms}`); S.tape = S.tape.concat(more); render(); });
+  on("#btnStart", "click", async () => { await api("/api/bot/start", { paper: true }); setTimeout(() => { refreshState(); refreshView(); }, 800); });
+  on("#btnStartCfg", "click", async () => { await api("/api/bot/start", {}); setTimeout(() => { refreshState(); refreshView(); }, 800); });
+  on("#btnStop", "click", async () => { const b = $("#btnStop"); b.disabled = true; b.textContent = "正在平仓并停止…"; await api("/api/bot/stop", {}); setTimeout(() => { refreshState(); refreshView(); }, 500); });
+  on("#btnReplay", "click", async () => { const r = await api("/api/replay", { duration: 15 }); if (r.error) alert(r.error); setTimeout(refreshView, 1000); });
+  on("#qSave", "click", async () => {
+    const patch = { "account.max_risk_per_trade_pct": Number($("#qRisk").value), "account.daily_loss_limit_pct": Number($("#qDay").value), "account.max_open_positions": Number($("#qOpen").value), "account.max_gross_leverage": Number($("#qGross").value), "classifier.llm.enabled": $("#qLlm").checked, "mode": $("#qMode").value };
+    const r = await api("/api/config/patch", { patch });
+    toast("#qMsg", r.ok ? "已保存，下次启动生效。" : `保存失败：${r.error || ("未能写入 " + (r.failed || []).join(", "))}`, r.ok);
+    refreshView();
+  });
+  document.querySelectorAll(".tmpl input").forEach(inp => inp.addEventListener("input", () => { S.tmplEdits[inp.dataset.cls + "." + inp.dataset.field] = inp.value; inp.classList.add("changed"); }));
+  on("#tmplSave", "click", async () => {
+    const patch = {}; for (const [k, v] of Object.entries(S.tmplEdits)) { const [cls, field] = k.split("."); patch[`templates.${cls}.${field}`] = field === "hold_s" || field === "max_lev" ? parseInt(v, 10) : Number(v); }
+    if (!Object.keys(patch).length) return toast("#tmplMsg", "没有改动。");
+    const r = await api("/api/config/patch", { patch }); toast("#tmplMsg", r.ok ? "已保存，下次启动生效。" : `保存失败：${r.error || (r.failed || []).join(", ")}`, r.ok); if (r.ok) S.tmplEdits = {}; refreshView();
+  });
+  on("#trustedSave", "click", async () => { const list = $("#trusted").value.split("\n").map(s => s.trim().replace(/^@/, "")).filter(Boolean); const r = await api("/api/config/patch", { patch: { "classifier.rules.trusted_accounts": list } }); toast("#trustedMsg", r.ok ? `已保存 ${list.length} 个账号，下次启动生效。` : `保存失败：${r.error || ""}`, r.ok); });
+  on("#cfgSave", "click", async () => { const r = await api("/api/config/text", { text: $("#cfgText").value }); toast("#cfgMsg", r.ok ? "已保存，下次启动生效。旧文件在 config.yaml.bak。" : `未保存：${r.error}`, r.ok); if (r.ok) refreshView(); });
+  on("#logGrep", "input", e => { S.logGrep = e.target.value; refreshLog(); });
+  on("#logAuto", "click", () => { S.logAuto = !S.logAuto; $("#logAuto").classList.toggle("on", S.logAuto); });
+  on("#logNow", "click", refreshLog);
+  on("#btRun", "click", async () => { const r = await api("/api/backtest", { events: $("#btEvents").value, delay: Number($("#btDelay").value), sweep: $("#btSweep").checked }); if (r.error) alert(r.error); setTimeout(refreshView, 600); });
+  const logEl = $("#log"); if (logEl) logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ------------------------------------------------------------------ boot
+(async function boot() { await refreshState(); await refreshView(); render(); })();
+</script>
+</body>
+</html>
