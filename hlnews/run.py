@@ -67,6 +67,10 @@ async def main_async(cfg: dict, args: argparse.Namespace) -> None:
         ws = fc.get("wallstreetcn") or {}
         if ws.get("enabled"):
             feed_list.append(F.wallstreetcn_feed(poll_s=float(ws.get("poll_s", 60))))
+        j10 = fc.get("jin10") or {}
+        if j10.get("enabled"):
+            feed_list.append(F.jin10_feed(poll_s=float(j10.get("poll_s", 3)), url=j10.get("url") or F.JIN10_FLASH_URL,
+                                          headers=j10.get("headers") or None, types=tuple(j10.get("types") or (0, 1))))
     engine = Engine(cfg, store, hl, feed_list)
 
     loop = asyncio.get_running_loop()

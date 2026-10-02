@@ -65,7 +65,7 @@ _CJK = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
 # capacity / output vocabulary. English needs a verb and an object; Chinese and Japanese compounds carry both.
 _EXPAND_EN = re.compile(r"\b(?:double|doubles|doubling|triple|boost|boosts|boosting|expand|expands|expanding|increase|increases|increasing|ramp(?:s|ing)? up|raise|raises|raising|add|adds|adding|build|builds|building|invest(?:s|ing)?)\b[^.;]{0,60}\b(?:capacity|production|output|supply|plant|factory|fab|line)\b|\bnew (?:plant|factory|fab)\b|\bcapacity (?:expansion|increase)\b", re.I)
 _CUT_EN = re.compile(r"\b(?:cut|cuts|cutting|reduce|reduces|reducing|slash|slashes|slashing|halt|halts|halting|suspend|suspends|idle|idles|idling|shut|shuts|shutting|lower|lowers|lowering)\b[^.;]{0,60}\b(?:capacity|production|output|supply|plant|factory|fab|line|wafer starts)\b|\b(?:plant|factory|fab) (?:fire|outage|shutdown|closure|explosion)\b|\bproduction (?:cut|halt|suspension)\b", re.I)
-_EXPAND_ZH = re.compile(r"扩产|扩建|产能(?:翻倍|倍增|提升|扩大|增加|翻番)|增产|新建(?:工厂|产线|晶圆厂)|加大投资|投资.{0,12}(?:扩|建)|増産|倍増|生産能力.{0,6}(?:拡大|増強)|供給.{0,4}(?:拡大|増)|新工場|増強")
+_EXPAND_ZH = re.compile(r"扩产|扩建|增产|(?:产能|产量|供应能力|供应|供给|生产能力|供給|生産能力).{0,6}(?:翻倍|倍增|翻番|提升|扩大|增加|倍増|拡大|増強|増)|(?:提高|提升|扩大|增加|翻倍).{0,8}(?:产能|产量|供应)|新建(?:工厂|产线|晶圆厂)|加大投资|投资.{0,12}(?:扩|建)|増産|新工場")
 _CUT_ZH = re.compile(r"减产|停产|削减产能|产能(?:削减|下调|收缩)|关停|停工|工厂(?:火灾|爆炸|停电|事故)|減産|生産(?:停止|縮小)|工場(?:火災|停止|閉鎖)")
 _SUPPLY_DENY = re.compile(r"\bdenies\b|\bdenied\b|\bnot planning\b|\bno plan\b|否认|否定|rumou?r|unconfirmed", re.I)
 

@@ -80,6 +80,7 @@ feeds:
     telegram: 60
     google_news: 10800        # Google sometimes indexes 1-2 h after pubDate; per-class max_news_age_s below decides what is still actionable
     wallstreetcn: 3600
+    jin10: 900
   treeofalpha:
     enabled: true
     ws_url: wss://news.treeofalpha.com/ws
@@ -111,6 +112,10 @@ feeds:
   wallstreetcn:
     enabled: true             # 华尔街见闻 7x24 快讯, Chinese, ~370 items/day, no key
     poll_s: 60
+  jin10:
+    enabled: true             # 金十数据 7x24 快讯 (web endpoint, no key, ~880 items/day). Data releases arrive 2-4 s after
+    poll_s: 3                 # the source as structured items and are rendered as English squawk lines for the macro rules.
+    types: [0, 1]             # 0 = text flash, 1 = data release; 2 (articles) skipped
 
 classifier:
   llm:
@@ -151,6 +156,7 @@ classifier:
       - digitimes
       - TrendForce
       - 华尔街见闻
+      - 金十数据
 
 # Trade templates per event class. hold_s is the hard time stop. stop/tp are % of entry.
 # Optional flags: alert: true  -> push an alert when a directional signal of this class passes its min_conf

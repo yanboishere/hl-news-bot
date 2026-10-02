@@ -35,6 +35,7 @@
 13. [常见问题](#13-常见问题)
 14. [可视化控制台与 macOS 客户端](#14-可视化控制台与-macos-客户端)
 15. [行业供给车道与关键新闻报警：东芝 HDD 案例](#15-行业供给车道与关键新闻报警东芝-hdd-案例)
+16. [金十数据：接口现状与接入](#16-金十数据接口现状与接入)
 
 **第二部分：架构设计与可行性结论**
 
@@ -1388,6 +1389,45 @@ ALERT [key_news] supply_expansion short xyz:WDC | Toshiba to double hard disk dr
 ### 这类新闻该怎么用
 
 这个案例的边际不在速度：信息公开 13 小时后价格才动。边际在两件事上，一是覆盖了加密源不碰的出版方，二是把"东芝扩产"翻译成"WDC 利空"这一步映射。所以模板设成 18 小时持有、`trade: false`。建议先让它报警一个季度，看 `alerts` 表里 `supply_*` 的信号在随后一个交易日的方向正确率，够了再开 `trade: true`。`sectors` 里目前只有 HDD 和存储两个行业，加行业只需要在 config 里加一组厂商名和标的。
+
+## 16. 金十数据：接口现状与接入
+
+金十没有公开文档的免费 API。2026-10-03 核实到三条路：
+
+| 路径 | 地址 | 鉴权 | 状态 |
+|---|---|---|---|
+| 网页用的快讯接口 | `https://flash-api.jin10.com/get_flash_list?channel=-8200&vip=1[&max_time=…]` | 请求头 `x-app-id: bVBF4FyRTn5NJF5n`、`x-version: 1.0.0`（前端公开值） | 可用。20 条/页，约 0.15 秒；`max_time` 翻页；只保留约 10 天；连发 12 次无限流。未文档化，akshare 的 `js_news` 用的就是它，字段可能变 |
+| 金十开放平台（商用） | `https://open-data-api.jin10.com/data-api/{flash,v2/flash,calendar/data,calendar/event,news,symbols,quotes}` | 请求头 `secret-key`，登录 open.jin10.com 后在"订单/套餐"页购买，有 Python/Go/Java/Node/C++ demo | 价格登录后可见，未公开 |
+| 金十智能开放平台（MCP） | `https://mcp.jin10.com/mcp`，Bearer token（登录金十账号→激活→复制） | 工具 `list_flash`、`search_flash`、`list_news`、`get_quote`、`get_kline` | 面向 AI 应用；轮询不如 REST 顺手 |
+
+财经日历的老 CDN（`cdn-rili.jin10.com/web_data/…/economics.json`）域名已不解析。
+
+### 为什么值得接
+
+两个实测数字。东芝那条，金十在 **10-01 22:23:34 UTC** 发了"市场消息：东芝将投资600亿日元，把硬盘（HDD）供应能力翻倍"，比日经英文稿晚 24 分钟，比 WDC 永续第一波早 12.5 小时，比华尔街见闻早 13 小时。10-02 的非农，BLS 12:30:00 UTC 发布，金十的**结构化数据条目**（`type=1`，含 actual / consensus / previous / star / 英文名）12:30:02–04 到达，文字快讯 12:30:04–06。这和直接轮询 bls.gov 是同一个速度档，但覆盖全球所有宏观数据并自带预期值。
+
+### 接法
+
+`jin10_feed`（`hlnews/feeds.py`）每 3 秒拉一页，按 id 去重。`type=0` 文字快讯去掉 `<b>` 后原样进管线（中文，行业供给规则能读）。`type=1` 数据条目用 `jin10_squawk` 拼成现有宏观规则认得的英文 squawk 行：
+
+```
+US Nonfarm Payroll Employment (9月) ACTUAL 29K (FORECAST 90K; PREVIOUS 162K)   ← 万人 ×10 → K
+US CPI YoY (Sep) ACTUAL 3.1% (FORECAST 2.9%; PREVIOUS 2.9%)
+```
+
+规则输出 `macro_nfp long 0.80（NFP 29k vs cons 90k）`、`macro_cpi short 0.85`。`type=2`（文章导流）跳过。配置：
+
+```yaml
+feeds:
+  jin10: {enabled: true, poll_s: 3, types: [0, 1]}
+  max_age_by_source: {jin10: 900}
+```
+
+"金十数据"已加入 `strong_publishers`。若买了开放平台，把 `feeds.jin10.url` 指到 `open-data-api.jin10.com/data-api/flash`、`headers` 填 `secret-key` 即可，解析逻辑不变。
+
+### 注意
+
+每天约 880 条快讯都会过一遍规则（<1 ms/条）并落库；若同时开 LLM 慢车道，规则判噪音的中文快讯会全部送去 LLM，Haiku 约 $0.3–0.5/天，可在 `classifier.llm` 里按需关掉或将来加按源过滤。金十的 `type=1` 条目时间是它自己的入库时间，比源晚 2–4 秒，加上 3 秒轮询，宏观数据端到端约 3–7 秒；要更快就在 `macro.py` 的发布窗口内把 `poll_s` 临时压到 0.5 秒（未实现）。免费接口随时可能改字段，`jin10_squawk` 对缺字段返回 `None` 并跳过，不会让进程挂掉。
 
 ---
 

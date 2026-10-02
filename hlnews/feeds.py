@@ -338,3 +338,110 @@ async def wallstreetcn_feed(poll_s: float = 60.0) -> AsyncIterator[NewsItem]:
         if len(seen) > 5000:
             seen = set(list(seen)[-2000:])
         await asyncio.sleep(poll_s)
+
+
+# --------------------------------------------------------------------------- 金十数据 flash (web API)
+JIN10_FLASH_URL = "https://flash-api.jin10.com/get_flash_list?channel=-8200&vip=1"
+JIN10_HEADERS = {"User-Agent": "Mozilla/5.0 (hl-news-bot)", "x-app-id": "bVBF4FyRTn5NJF5n", "x-version": "1.0.0",
+                 "Origin": "https://www.jin10.com", "Referer": "https://www.jin10.com/"}
+_JIN10_NUM_UNIT = {"万人": (10, "K"), "千人": (1, "K"), "万": (10, "K")}
+
+
+def jin10_squawk(d: dict) -> str | None:
+    """type=1 (data release) -> an English squawk line the macro rules already parse, e.g.
+    'US Nonfarm Payroll Employment YoY (Sep) ACTUAL 29K (FORECAST 90K; PREVIOUS 162K)'.
+    金十 names: data.name (zh), data.i18n_i.en.name (en), compare_period YoY/MoM/QoQ, unit (%, 万人, ...), multiple."""
+    en = (d.get("i18n_i") or {}).get("en") or {}
+    name = en.get("name") or d.get("name") or ""
+    country = en.get("country") or d.get("country") or ""
+    cmp_ = d.get("compare_period") or ""
+    unit = d.get("unit") or ""
+    period = d.get("time_period") or ""
+    actual, cons, prev = d.get("actual"), d.get("consensus"), d.get("previous")
+    if actual in (None, "", "-"):
+        return None
+
+    def fmt(v) -> str:
+        if v in (None, "", "-"):
+            return "n/a"
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return str(v)
+        if unit in _JIN10_NUM_UNIT:
+            mul, u = _JIN10_NUM_UNIT[unit]
+            return f"{x * mul:g}{u}"
+        return f"{x:g}{unit if unit in ('%',) else ''}"
+
+    cc = {"United States": "US", "Euro Zone": "EZ", "United Kingdom": "UK", "China": "CN", "Japan": "JP", "Germany": "DE"}.get(country, country)
+    head = f"{cc} {name}{(' ' + cmp_) if cmp_ and cmp_ not in name else ''}{(' (' + period + ')') if period else ''}"
+    return f"{head} ACTUAL {fmt(actual)} (FORECAST {fmt(cons)}; PREVIOUS {fmt(prev)})"
+
+
+async def jin10_feed(poll_s: float = 3.0, url: str = JIN10_FLASH_URL, headers: dict | None = None, types: tuple[int, ...] = (0, 1)) -> AsyncIterator[NewsItem]:
+    """金十数据 7x24 快讯 via the endpoint the jin10.com front end uses (undocumented; the same one akshare wraps).
+
+    Measured 2026-10-02: NFP structured items (type=1, actual/consensus/previous/star) posted 2-4 s after the BLS
+    release; the Toshiba HDD story posted 24 min after Nikkei Asia and 13 h before 华尔街见闻. 20 items per page,
+    ~0.15 s, only ~10 days of history. Reachable directly (no proxy) from China. For the sanctioned paid route
+    (open-data-api.jin10.com/data-api/flash with a secret-key header) point `url`/`headers` at it.
+    type 0 = text flash (Chinese), type 1 = data release (rendered as an English squawk line), type 2 = articles (skipped)."""
+    import urllib.request
+    from datetime import datetime, timedelta, timezone
+
+    hdrs = dict(JIN10_HEADERS)
+    if headers:
+        hdrs.update(headers)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    seen: set[str] = set()
+    first = True
+    loop = asyncio.get_running_loop()
+    cst = timezone(timedelta(hours=8))
+
+    def fetch() -> list[dict]:
+        with opener.open(urllib.request.Request(url, headers=hdrs), timeout=15) as r:
+            d = json.loads(r.read())
+        return d.get("data") or []
+
+    while True:
+        try:
+            items = await loop.run_in_executor(None, fetch)
+        except Exception as e:  # noqa: BLE001
+            log.warning("jin10 fetch failed: %s", e)
+            items = []
+        for it in sorted(items, key=lambda x: (x.get("time") or "", str(x.get("id")))):
+            iid = str(it.get("id"))
+            if iid in seen:
+                continue
+            seen.add(iid)
+            if first:
+                continue
+            typ = it.get("type")
+            if typ not in types:
+                continue
+            d = it.get("data") or {}
+            try:
+                ts = int(datetime.strptime(it["time"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=cst).timestamp() * 1000)
+            except Exception:  # noqa: BLE001
+                ts = now_ms()
+            if typ == 1:
+                title = jin10_squawk(d)
+                if not title:
+                    continue
+                raw = {"id": iid, "type": 1, "zh": f"{d.get('country', '')}{d.get('time_period', '')}{d.get('name', '')} {d.get('actual')}{d.get('unit', '')}",
+                       "star": d.get("star"), "indicator_id": d.get("indicator_id"), "pub_time": d.get("pub_time"), "important": it.get("important")}
+            else:
+                text = re.sub(r"<[^>]+>", "", (d.get("title") or "") + " " + (d.get("content") or "")).strip()
+                if not text:
+                    continue
+                title = text[:600]
+                raw = {"id": iid, "type": typ, "important": it.get("important"), "tags": it.get("tags"), "channel": it.get("channel"),
+                       "source": d.get("source"), "pic": bool(d.get("pic"))}
+            yield NewsItem(
+                id="jin10_" + iid, source="jin10", channel="金十数据", title=title, url=f"https://flash.jin10.com/detail/{iid}",
+                ts_ms=ts, recv_ms=now_ms(), account="金十数据", suggestions=[], raw=raw,
+            )
+        first = False
+        if len(seen) > 4000:
+            seen = set(list(seen)[-1500:])
+        await asyncio.sleep(poll_s)
