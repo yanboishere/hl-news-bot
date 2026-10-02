@@ -10,7 +10,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .models import Classification, Direction, EventClass, NewsItem
 
@@ -43,6 +43,95 @@ class RuleContext:
     core_cpi_consensus: float | None = None
     nfp_consensus: float | None = None    # thousands
     fomc_expected_bps: int | None = None  # expected change, e.g. -25
+    sectors: dict = field(default_factory=dict)          # config.yaml `sectors`
+    strong_publishers: set[str] = field(default_factory=set)  # publishers whose google_news/wallstreetcn items count as trusted
+
+
+def is_trusted_source(item: NewsItem, ctx: RuleContext) -> bool:
+    """One definition shared by the rules lane and the engine's corroboration step."""
+    if (item.account or "").lower() in {a.lower() for a in ctx.trusted_accounts}:
+        return True
+    if item.channel in {"Binance EN", "Upbit", "Bithumb", "usGov"} or item.source in {"hl_listings", "bls_poll"}:
+        return True
+    # strong publishers count regardless of transport (Google News, 见闻, Tree of Alpha "Blogs", replay)
+    pub = (item.account or item.channel or "").strip().lower()
+    if pub and any(p.lower() == pub or (len(p) >= 6 and p.lower() in pub) for p in ctx.strong_publishers):
+        return True
+    return False
+
+
+# --------------------------------------------------------------------------- sector supply rule
+_CJK = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
+# capacity / output vocabulary. English needs a verb and an object; Chinese and Japanese compounds carry both.
+_EXPAND_EN = re.compile(r"\b(?:double|doubles|doubling|triple|boost|boosts|boosting|expand|expands|expanding|increase|increases|increasing|ramp(?:s|ing)? up|raise|raises|raising|add|adds|adding|build|builds|building|invest(?:s|ing)?)\b[^.;]{0,60}\b(?:capacity|production|output|supply|plant|factory|fab|line)\b|\bnew (?:plant|factory|fab)\b|\bcapacity (?:expansion|increase)\b", re.I)
+_CUT_EN = re.compile(r"\b(?:cut|cuts|cutting|reduce|reduces|reducing|slash|slashes|slashing|halt|halts|halting|suspend|suspends|idle|idles|idling|shut|shuts|shutting|lower|lowers|lowering)\b[^.;]{0,60}\b(?:capacity|production|output|supply|plant|factory|fab|line|wafer starts)\b|\b(?:plant|factory|fab) (?:fire|outage|shutdown|closure|explosion)\b|\bproduction (?:cut|halt|suspension)\b", re.I)
+_EXPAND_ZH = re.compile(r"扩产|扩建|产能(?:翻倍|倍增|提升|扩大|增加|翻番)|增产|新建(?:工厂|产线|晶圆厂)|加大投资|投资.{0,12}(?:扩|建)|増産|倍増|生産能力.{0,6}(?:拡大|増強)|供給.{0,4}(?:拡大|増)|新工場|増強")
+_CUT_ZH = re.compile(r"减产|停产|削减产能|产能(?:削减|下调|收缩)|关停|停工|工厂(?:火灾|爆炸|停电|事故)|減産|生産(?:停止|縮小)|工場(?:火災|停止|閉鎖)")
+_SUPPLY_DENY = re.compile(r"\bdenies\b|\bdenied\b|\bnot planning\b|\bno plan\b|否认|否定|rumou?r|unconfirmed", re.I)
+
+
+def _mention_pos(text_low: str, name: str) -> int:
+    """Start index of the first mention of `name`, or -1."""
+    if _CJK.search(name):
+        return text_low.find(name.lower())
+    m = re.search(rf"(?<![a-z0-9]){re.escape(name.lower())}(?![a-z0-9])", text_low)
+    return m.start() if m else -1
+
+
+def _mentions(text_low: str, name: str) -> bool:
+    return _mention_pos(text_low, name) >= 0
+
+
+def classify_sector(item: NewsItem, ctx: RuleContext, trusted: bool) -> Classification | None:
+    """Capacity expansion / cut by a maker -> direction for its tradeable peers. Returns None when nothing matches."""
+    t0 = time.perf_counter()
+    text = item.title
+    low = text.lower()
+    for sector, sc in (ctx.sectors or {}).items():
+        mentions = {m: _mention_pos(low, m) for m in sc.get("makers", []) if _mentions(low, m)}
+        if not mentions:
+            continue
+        has_product = any(_mentions(low, w) for w in sc.get("product_words", [])) if sc.get("product_words") else True
+        em = _EXPAND_EN.search(text) or _EXPAND_ZH.search(text)
+        cm = _CUT_EN.search(text) or _CUT_ZH.search(text)
+        if (em is None and cm is None) or (em is not None and cm is not None):
+            continue
+        if _SUPPLY_DENY.search(text):
+            continue
+        expand = em is not None
+        verb_pos = (em or cm).start()
+        # Actors = makers named in the same clause as the capacity verb, before it ("SK Hynix and Samsung to expand ...").
+        # A clause starts after sentence punctuation or a subordinating word ("Seagate falls as Toshiba plans to double").
+        # A maker followed by "shares/stock/股/跌/涨" is a price-reaction mention, not an actor.
+        clause_start = 0
+        for m in re.finditer(r"[.;。；，,]|\b(?:as|after|while|amid|following|on|because)\b", low[:verb_pos]):
+            clause_start = m.end()
+        reaction = re.compile(r"^.{0,3}(?:shares?|stock|股价|股|跌|涨|急落|下落|上昇)")
+        in_clause = {m: p for m, p in mentions.items() if clause_start <= p < verb_pos and not reaction.search(low[p + len(m):p + len(m) + 12])}
+        if in_clause:
+            actor_names = set(in_clause)
+        else:
+            before = {m: p for m, p in mentions.items() if p < verb_pos and not reaction.search(low[p + len(m):p + len(m) + 12])}
+            pick = max(before, key=before.get) if before else min(mentions, key=mentions.get)
+            actor_names = {pick}
+        # names that alias the same company (e.g. "sk hynix" and "hynix") count as the same actor
+        actor_names |= {m for m, p in mentions.items() for a in list(actor_names) if m != a and (m in a or a in m)}
+        actor_name = "+".join(sorted(actor_names, key=lambda m: mentions[m]))
+        actor_map = sc.get("actor_ticker", {}) or {}
+        actors = {actor_map[m] for m in actor_names if m in actor_map}
+        peers = [tk for tk in sc.get("tickers", []) if tk in ctx.universe and tk not in actors]
+        if not peers:
+            return Classification(lane="rules", event_class=EventClass.SUPPLY_EXPANSION if expand else EventClass.SUPPLY_CUT,
+                                  direction=Direction.NONE, confidence=0.3, tickers=[], reason=f"{sector}: actor {actor_name} is the only tradeable name",
+                                  latency_ms=int((time.perf_counter() - t0) * 1000))
+        ec = EventClass.SUPPLY_EXPANSION if expand else EventClass.SUPPLY_CUT
+        d = Direction.SHORT if expand else Direction.LONG
+        # confidence: product word present and trusted publisher -> 0.8; product word only -> 0.7; maker-only -> 0.6
+        conf = 0.8 if (has_product and trusted) else (0.7 if has_product else 0.6)
+        reason = f"{sector}: {actor_name} {'expands capacity' if expand else 'cuts output'} -> peers {'short' if expand else 'long'}"
+        return Classification(lane="rules", event_class=ec, direction=d, confidence=conf, tickers=peers, reason=reason,
+                              latency_ms=int((time.perf_counter() - t0) * 1000))
+    return None
 
 
 def map_tickers(item: NewsItem, ctx: RuleContext) -> list[str]:
@@ -64,10 +153,9 @@ def classify_rules(item: NewsItem, ctx: RuleContext) -> Classification:
     text = item.title
     low = text.lower()
     tickers = map_tickers(item, ctx)
-    trusted = (item.account or "").lower() in {a.lower() for a in ctx.trusted_accounts} or item.channel in {
-        "Binance EN", "Upbit", "Bithumb", "usGov"
-    } or item.source == "hl_listings"
-    is_rumor = _has(text, r"\brumou?r", r"\bunconfirmed", r"\breportedly", r"\bsources say", r"\bmay be\b", r"\?\s*$")
+    trusted = is_trusted_source(item, ctx)
+    # "reportedly" / "sources say" are normal wire attribution (digitimes re-reporting Nikkei) and are NOT rumor markers
+    is_rumor = _has(text, r"\brumou?r", r"\bunconfirmed", r"\bunverified", r"\bspeculat", r"\bmay be\b", r"\?\s*$")
 
     def done(ec: EventClass, d: Direction, conf: float, reason: str, tk: list[str] | None = None, sched=False, mag=None):
         return Classification(
@@ -214,6 +302,12 @@ def classify_rules(item: NewsItem, ctx: RuleContext) -> Classification:
             return done(EventClass.TRUMP, d, 0.8, "Trump crypto policy post" if own_post else "trusted relay of Trump crypto policy", ["BTC", "ETH"])
         if own_post:
             return done(EventClass.TRUMP, Direction.NONE, 0.3, "Trump post, no clear read")
+
+    # ---- sector supply: a maker expands or cuts capacity -> peers in the same sector
+    sec = classify_sector(item, ctx, trusted)
+    if sec is not None:
+        sec.is_rumor = is_rumor
+        return sec
 
     # ---- equities: earnings / guidance / M&A (only for names in universe, and only from financial sources)
     wire = item.channel == "Blogs" and (item.account or "").upper() in {"BUSINESS WIRE", "PR NEWSWIRE", "GLOBENEWSWIRE", "REUTERS", "BLOOMBERG", "WSJ", "CNBC", "FT", "THE BLOCK", "COINDESK"}

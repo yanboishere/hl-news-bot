@@ -61,6 +61,12 @@ async def main_async(cfg: dict, args: argparse.Namespace) -> None:
         if fc["telegram"]["enabled"]:
             tg = fc["telegram"]
             feed_list.append(F.telegram_feed(int(tg["api_id"]), tg["api_hash"], tg["session"], list(tg["channels"])))
+        gn = fc.get("google_news") or {}
+        if gn.get("enabled"):
+            feed_list.append(F.google_news_feed(list(gn.get("queries") or []), poll_s=float(gn.get("poll_s", 90)), hl=str(gn.get("hl", "en-US"))))
+        ws = fc.get("wallstreetcn") or {}
+        if ws.get("enabled"):
+            feed_list.append(F.wallstreetcn_feed(poll_s=float(ws.get("poll_s", 60))))
     engine = Engine(cfg, store, hl, feed_list)
 
     loop = asyncio.get_running_loop()

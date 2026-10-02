@@ -25,6 +25,8 @@ class EventClass(str, Enum):
     EARNINGS = "earnings"
     GUIDANCE = "guidance"
     MNA = "m_and_a"
+    SUPPLY_EXPANSION = "supply_expansion"   # a maker adds capacity -> bearish for its tradeable peers
+    SUPPLY_CUT = "supply_cut"               # a maker cuts output / plant outage -> bullish for peers
     NOISE = "noise"
 
 

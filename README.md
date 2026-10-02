@@ -34,6 +34,7 @@
 12. [已知限制与未做的事](#12-已知限制与未做的事)
 13. [常见问题](#13-常见问题)
 14. [可视化控制台与 macOS 客户端](#14-可视化控制台与-macos-客户端)
+15. [行业供给车道与关键新闻报警：东芝 HDD 案例](#15-行业供给车道与关键新闻报警东芝-hdd-案例)
 
 **第二部分：架构设计与可行性结论**
 
@@ -805,12 +806,12 @@ pip install telethon
 - **单消费者。** 开 LLM 后新闻风暴会堆队列。
 - **行情是 2 秒 REST 轮询**，不是 WebSocket。止损判断滞后最多 2 秒 + RTT。
 - **paper 滑点模型偏乐观。** 它按当前静态盘口算，没有模拟新闻瞬间的撤单。
-- **Telegram 源没有单独的时效过滤**（依赖引擎入口的 20 秒）。
+- **时效过滤按源配置**（`feeds.max_age_by_source`），再按事件类配置（`templates.*.max_news_age_s`）；两层都没写的源用 `feeds.max_age_s`。
 - **周末 HIP-3 没有特殊模板。** 第二部分 B2.4 节的"周末缺口"策略还没写。
 - **EDGAR / PR Newswire 源没接。** 财报类目前只能靠 Tree of Alpha 转发的通讯社博客。
 - **回测器只覆盖 BTC/ETH。** HIP-3 标的没有免费的分钟级历史。
 - **`classifier.llm.min_confidence`** 配置项当前未使用。Hyperliquid builder code 也没有接（SDK 支持，需要在 `order()` 调用里传 `builder=`）。
-- **规则是英文正则。** Tree of Alpha 的 Upbit/Bithumb 公告有韩文，只匹配了 "상장"（上币）一个词。
+- **规则主要是英文正则。** 行业供给规则覆盖了中文和日文厂商名与扩产/减产措辞；其他类对中文标题仍大多判噪音。Upbit/Bithumb 韩文公告只匹配了 "상장"（上币）一个词。
 
 ---
 
@@ -1339,6 +1340,54 @@ flowchart LR
 ```
 
 服务对数据库是只读连接（`mode=ro`），所以它和 bot 不会互相写坏；唯一的互斥是"回放"：它和 bot 写同一个库，所以 bot 在跑时回放按钮是禁用的。
+
+## 15. 行业供给车道与关键新闻报警：东芝 HDD 案例
+
+2026-10-01 21:59 UTC，日经英文版报道东芝将投资 600 亿日元把 HDD 产能翻倍。次日 STX 盘中 −12%～−16%，WDC −10%。用这条新闻检验系统，暴露了三个缺口，这一节记录缺口、补法和实测。
+
+### 当时发生了什么
+
+| 时间 (UTC) | 事件 | 来源 |
+|---|---|---|
+| 10-01 20:00 | 日本経済新聞 早报：東芝、HDD供給倍増へ600億円投資 | Google News RSS（ja） |
+| 10-01 21:59 | Nikkei Asia 英文稿 | Google News RSS |
+| 10-02 01:41 / 02:11 | digitimes、Investing.com 转述 | Google News RSS |
+| 10-02 06:19 | TrendForce | Google News RSS |
+| 10-02 10:50–11:14 | **xyz:WDC 永续第一波 −5.9%**（449 → 423），美东 06:50 盘前 | Hyperliquid 5 分钟 K |
+| 10-02 10:53 | Newsquawk 推送 | Google News RSS |
+| 10-02 11:10 | 华尔街见闻："希捷盘前跌超 7%，西部数据跌 8%，有报道称东芝…" | 见闻 lives API |
+| 10-02 13:25–14:50 | 开盘第二波，WDC 跌到 398.75，全天 −13.4%（从 461） | Hyperliquid 5 分钟 K |
+
+日经英文稿发布后的 12.8 小时里，WDC 永续从 461 只漂到 448（−2.8%），成交 3,423 笔。信息公开了半天，价格没有反应，直到美股盘前的 squawk 把它推给交易员。按模板（止损 3%、止盈 5%）回放各时点做空 WDC：日经稿、digitimes、Investing.com、TrendForce 四个入场点全部在 11:00 UTC 止盈，到 15:00 的无管理收益 +13%；Newsquawk 时点 +10.4%；见闻时点 +6.3%。
+
+Tree of Alpha 过去 164 小时的 2,566 条里没有这条新闻，唯一命中 "STX" 的是 Stacks 代币的推文。它是加密源，不覆盖日经类股票报道。
+
+### 三个缺口和补法
+
+**覆盖。** 新增两个源：`google_news_feed`（按查询词轮询 Google News RSS，每 90 秒，发布方时间戳在 pubDate；免费无 key）和 `wallstreetcn_feed`（华尔街见闻 7x24 中文快讯，每 60 秒）。配置在 `feeds.google_news.queries`，每个查询一次 HTTP 请求，保持具体。Google 有时在发布 1–2 小时后才收录，所以 `feeds.max_age_by_source` 给 google_news 3 小时、见闻 1 小时，而 Tree of Alpha 仍是 20 秒。
+
+**映射。** 新增 `classify_sector`：配置 `sectors` 里每个行业有 `makers`（中英日厂商名）、`tickers`（该行业在 HL 上可交易的同业）、`actor_ticker`（厂商名→自己的永续，用于把行为主体从同业里排除）、`product_words`（产品词）。规则：标题提到某行业的厂商 + 扩产措辞（double/expand/boost … capacity/production/output/supply、new plant、扩产/产能翻倍/增产、増産/倍増）→ `supply_expansion`，同业做空；减产措辞（cut/halt/idle … production、plant fire/outage、减产/停产、減産/工場火災）→ `supply_cut`，同业做多。行为主体 = 和扩产动词在同一从句里、动词之前的厂商（"SK Hynix and Samsung to expand" 两个都是主体；"Seagate falls as Toshiba plans to double" 里 "as" 开新从句，Toshiba 是主体；"XX shares fall" 是价格反应不是主体）。主体若自己可交易则排除（"Western Digital to expand" 只剩主体，返回无方向）。置信：产品词 + 可信出版方 0.80，产品词 0.70，仅厂商名 0.60。否认措辞（denies / 否认 / rumour）直接跳过。
+
+**范围与报警。** `universe.stocks` 加入 xyz:WDC、xyz:SNDK、xyz:SKHX（STX 不在 Hyperliquid 上）。模板多了两个开关：`alert: true` 让该类的信号在过门槛时推送报警，`trade: false` 让它只报警不交易。`supply_expansion` / `supply_cut` 默认 `alert: true, trade: false`，持有 18 小时（必须跨过下一个美股交易时段）、止损 3%、止盈 5%、新闻新鲜度上限 4 小时。报警模块 `hlnews/alerts.py` 永远写 `alerts` 表和日志，可选 Telegram（Bot API `sendMessage`，环境变量 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`）和 macOS 通知（`osascript`）。同一（事件类、标的、方向）6 小时内只报一次，日经稿之后的十家转述只落库不推送。
+
+还有两处顺带改动。`classifier.rules.strong_publishers`（Nikkei Asia、日本経済新聞、Reuters、Bloomberg、digitimes、TrendForce、华尔街见闻等）在任何传输层上都算可信来源：免二源佐证，置信走 0.80 档。各事件类新增 `max_news_age_s`：宏观 120 秒、黑客/ETF/关税 600 秒、财报 1800 秒、同业供给 14400 秒，避免一条两小时前的黑客新闻走进 90 分钟持仓的模板。中文标题的去重指纹改为前 24 个汉字 + 文中数字。
+
+### 实测
+
+`data/replay_toshiba.jsonl` 是这个事件的 8 条真实标题（日经日文/英文、digitimes、Investing.com、TrendForce、见闻中文、IBD 反应稿、Stacks 推文）。默认配置回放：
+
+```
+ALERT [key_news] supply_expansion short xyz:WDC | Toshiba to double hard disk drive supply to fill AI chip memory gap
+      来源 Nikkei Asia · 置信 0.80 · hdd: toshiba expands capacity -> peers short （仅报警，模板 trade: false）
+```
+
+一次报警，来自第一条可信出版方的稿子；后面 5 条同事件转述被去重；IBD 的"股价下跌"反应稿和 Stacks 推文判为噪音。把 `supply_expansion` 的 `trade` 改成 true 再回放，会在 xyz:WDC 上开出纸面空单（10x 逐仓标的，模板杠杆上限 2x，名义 = 权益 × 0.5% ÷ 3%）。原来的 14 条回放样本逐行结果不变。
+
+实时跑 75 秒：Google News 源在基线之后又收到两篇关于东芝/WDC 的新文章（发布时间 1.5–1.9 小时前，Google 迟收录），说明这个源确实在工作，也说明为什么它的时效要放宽。
+
+### 这类新闻该怎么用
+
+这个案例的边际不在速度：信息公开 13 小时后价格才动。边际在两件事上，一是覆盖了加密源不碰的出版方，二是把"东芝扩产"翻译成"WDC 利空"这一步映射。所以模板设成 18 小时持有、`trade: false`。建议先让它报警一个季度，看 `alerts` 表里 `supply_*` 的信号在随后一个交易日的方向正确率，够了再开 `trade: true`。`sectors` 里目前只有 HDD 和存储两个行业，加行业只需要在 config 里加一组厂商名和标的。
 
 ---
 

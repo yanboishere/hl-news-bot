@@ -289,6 +289,8 @@ class Data:
         for s in r["signals"]:
             for d in s.get("decisions", []):
                 if not d["accepted"]:
+                    if d["reason"].startswith("alert-only"):
+                        return "已报警（模板不交易）"
                     return f"风控拒绝：{d['reason']}"
         return "信号"
 
@@ -310,6 +312,22 @@ class Data:
             return []
         since = int(time.time() * 1000) - int(hours * 3600 * 1000)
         rows = [dict(r) for r in c.execute("select ts_ms, equity_usd, open_positions from equity where ts_ms>=? order by ts_ms", (since,))]
+        c.close()
+        return rows
+
+    def alerts(self, limit: int = 50) -> list[dict]:
+        c = self.conn()
+        if c is None:
+            return []
+        try:
+            rows = [dict(r) for r in c.execute("select * from alerts order by ts_ms desc limit ?", (limit,))]
+        except sqlite3.OperationalError:
+            rows = []
+        for r in rows:
+            try:
+                r["meta"] = json.loads(r.get("meta") or "{}")
+            except Exception:  # noqa: BLE001
+                pass
         c.close()
         return rows
 
@@ -534,6 +552,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self.bot.oneshot_result())
             if p == "/api/backtest":
                 return self._json(self.bt.status())
+            if p == "/api/alerts":
+                return self._json(self.data.alerts(limit=int(q.get("limit", 50))))
             return self._json({"error": "not found"}, 404)
         except Exception as e:  # noqa: BLE001
             return self._json({"error": f"{type(e).__name__}: {e}"}, 500)

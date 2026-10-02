@@ -34,6 +34,10 @@ CREATE TABLE IF NOT EXISTS positions (
 CREATE TABLE IF NOT EXISTS equity (
   ts_ms INTEGER, equity_usd REAL, open_positions INTEGER
 );
+CREATE TABLE IF NOT EXISTS alerts (
+  ts_ms INTEGER, kind TEXT, title TEXT, body TEXT, meta TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(ts_ms);
 CREATE INDEX IF NOT EXISTS idx_news_ts ON news(ts_ms);
 CREATE INDEX IF NOT EXISTS idx_pos_entry ON positions(entry_ms);
 """
@@ -84,6 +88,25 @@ class Store:
 
     def equity(self, ts_ms: int, equity_usd: float, open_positions: int) -> None:
         self._exec("INSERT INTO equity VALUES (?,?,?)", (ts_ms, equity_usd, open_positions))
+
+    def alert(self, ts_ms: int, kind: str, title: str, body: str, meta: dict) -> None:
+        self._exec("INSERT INTO alerts VALUES (?,?,?,?,?)", (ts_ms, kind, title, body, json.dumps(meta, ensure_ascii=False, default=str)[:20000]))
+
+    def alerts(self, limit: int = 50, since_ms: int | None = None) -> list[dict[str, Any]]:
+        if since_ms:
+            cur = self.conn.execute("SELECT * FROM alerts WHERE ts_ms>=? ORDER BY ts_ms DESC LIMIT ?", (since_ms, limit))
+        else:
+            cur = self.conn.execute("SELECT * FROM alerts ORDER BY ts_ms DESC LIMIT ?", (limit,))
+        cols = [c[0] for c in cur.description]
+        out = []
+        for row in cur.fetchall():
+            d = dict(zip(cols, row))
+            try:
+                d["meta"] = json.loads(d.get("meta") or "{}")
+            except Exception:  # noqa: BLE001
+                pass
+            out.append(d)
+        return out
 
     # ------------------------------------------------------------------ reads
     def closed_positions(self) -> list[dict[str, Any]]:

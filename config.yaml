@@ -22,7 +22,7 @@ account:
 
 universe:
   crypto: ["BTC", "ETH"]
-  stocks: ["xyz:TSLA", "xyz:NVDA", "xyz:AAPL", "xyz:MSFT", "xyz:META", "xyz:GOOGL", "xyz:AMZN", "xyz:MU"]
+  stocks: ["xyz:TSLA", "xyz:NVDA", "xyz:AAPL", "xyz:MSFT", "xyz:META", "xyz:GOOGL", "xyz:AMZN", "xyz:MU", "xyz:WDC", "xyz:SNDK", "xyz:SKHX"]
   ticker_aliases:             # free text -> HL coin
     bitcoin: BTC
     btc: BTC
@@ -44,9 +44,42 @@ universe:
     amazon: xyz:AMZN
     amzn: xyz:AMZN
     micron: xyz:MU
+    美光: xyz:MU
+    western digital: xyz:WDC
+    wdc: xyz:WDC
+    西部数据: xyz:WDC
+    sandisk: xyz:SNDK
+    sndk: xyz:SNDK
+    闪迪: xyz:SNDK
+    sk hynix: xyz:SKHX
+    hynix: xyz:SKHX
+    海力士: xyz:SKHX
+
+# Sector map for the supply rule: when a *maker* of a sector announces capacity expansion or a cut, the
+# tradeable *peers* in that sector get a direction (expansion -> short peers, cut -> long peers). The actor
+# itself is excluded (its own direction is ambiguous). Names are matched case-insensitively as whole words;
+# Chinese / Japanese names are matched as substrings.
+sectors:
+  hdd:
+    makers: ["toshiba", "東芝", "东芝", "seagate", "希捷", "シーゲイト", "western digital", "西部数据", "ウエスタンデジタル"]
+    actor_ticker: {"western digital": "xyz:WDC", "西部数据": "xyz:WDC", "ウエスタンデジタル": "xyz:WDC"}
+    tickers: ["xyz:WDC"]                 # STX is not listed on Hyperliquid (checked 2026-10-02)
+    product_words: ["hdd", "hard disk", "hard drive", "hard-disk", "hard-drive", "nearline", "硬盘", "ハードディスク"]
+  memory:
+    makers: ["micron", "美光", "マイクロン", "sk hynix", "hynix", "海力士", "samsung", "三星", "サムスン", "kioxia", "铠侠", "キオクシア", "sandisk", "闪迪", "cxmt", "长鑫", "ymtc", "长江存储", "nanya", "南亚科"]
+    actor_ticker: {"micron": "xyz:MU", "美光": "xyz:MU", "マイクロン": "xyz:MU", "sk hynix": "xyz:SKHX", "hynix": "xyz:SKHX", "海力士": "xyz:SKHX", "sandisk": "xyz:SNDK", "闪迪": "xyz:SNDK"}
+    tickers: ["xyz:MU", "xyz:SKHX", "xyz:SNDK"]
+    product_words: ["dram", "nand", "hbm", "memory chip", "flash", "存储芯片", "内存", "闪存", "メモリー", "メモリ"]
 
 feeds:
-  max_age_s: 20               # applies to every live feed: items older than this on arrival are dropped
+  max_age_s: 20               # default for live feeds: items older than this on arrival are dropped
+  max_age_by_source:          # slow-diffusion sources get a longer window (the edge there is coverage, not latency)
+    treeofalpha: 20
+    hl_listings: 60
+    bls_poll: 60
+    telegram: 60
+    google_news: 10800        # Google sometimes indexes 1-2 h after pubDate; per-class max_news_age_s below decides what is still actionable
+    wallstreetcn: 3600
   treeofalpha:
     enabled: true
     ws_url: wss://news.treeofalpha.com/ws
@@ -63,6 +96,21 @@ feeds:
     poll_s: 5                 # diff of {"type":"meta"} universe -> LISTING_HL events
   macro:
     enabled: true             # BLS schedule + ForexFactory consensus + release-second polling of bls.gov
+  google_news:
+    enabled: true             # RSS search per query; free, no key; ~1-10 min behind the publisher
+    poll_s: 90
+    queries:                  # keep these specific; each is one HTTP request per poll
+      - "Toshiba HDD"
+      - "Seagate OR \"Western Digital\" hard drive"
+      - "Micron OR \"SK Hynix\" OR Samsung DRAM capacity"
+      - "Kioxia OR SanDisk NAND"
+      - "CXMT OR YMTC memory"
+      - "Nvidia export OR Nvidia China chips"
+      - "Tesla deliveries OR Tesla recall"
+    hl: en-US
+  wallstreetcn:
+    enabled: true             # 华尔街见闻 7x24 快讯, Chinese, ~370 items/day, no key
+    poll_s: 60
 
 classifier:
   llm:
@@ -87,28 +135,57 @@ classifier:
       - zachxbt
       - PeckShieldAlert
       - CertiKAlert
-    require_two_sources_for: ["hack_exploit", "regulatory", "etf", "m_and_a", "tariff", "trump_policy"]
+    require_two_sources_for: ["hack_exploit", "regulatory", "etf", "m_and_a", "tariff", "trump_policy", "supply_expansion", "supply_cut"]
     corroboration_window_s: 90
+    corroboration_window_by_class:   # slow-diffusion classes: a second publisher may take an hour
+      supply_expansion: 7200
+      supply_cut: 7200
+    strong_publishers:               # items from these publishers count as a trusted source on any transport
+      - Nikkei Asia
+      - 日本経済新聞
+      - Reuters
+      - Bloomberg
+      - The Wall Street Journal
+      - Financial Times
+      - CNBC
+      - digitimes
+      - TrendForce
+      - 华尔街见闻
 
 # Trade templates per event class. hold_s is the hard time stop. stop/tp are % of entry.
+# Optional flags: alert: true  -> push an alert when a directional signal of this class passes its min_conf
+#                 trade: false -> alert / log only, never open a position (default true)
+#                 max_news_age_s -> ignore headlines older than this for the class (fast classes need fresh news; sector news can be hours old)
 templates:
-  macro_cpi:      {hold_s: 1800, stop_pct: 0.8,  tp_pct: 1.2,  risk_pct: 0.5,  max_lev: 3, min_conf: 0.8}
-  macro_nfp:      {hold_s: 3600, stop_pct: 0.9,  tp_pct: 1.2,  risk_pct: 0.4,  max_lev: 2, min_conf: 0.8}
-  macro_fomc:     {hold_s: 3600, stop_pct: 1.0,  tp_pct: 1.2,  risk_pct: 0.4,  max_lev: 2, min_conf: 0.8}
-  hack_exploit:   {hold_s: 5400, stop_pct: 1.5,  tp_pct: 2.5,  risk_pct: 0.8,  max_lev: 3, min_conf: 0.8}
-  depeg:          {hold_s: 5400, stop_pct: 1.5,  tp_pct: 2.5,  risk_pct: 0.6,  max_lev: 2, min_conf: 0.85}
-  etf:            {hold_s: 3600, stop_pct: 1.5,  tp_pct: 2.0,  risk_pct: 0.5,  max_lev: 2, min_conf: 0.85}
-  regulatory:     {hold_s: 3600, stop_pct: 1.5,  tp_pct: 2.0,  risk_pct: 0.5,  max_lev: 2, min_conf: 0.85}
-  tariff:         {hold_s: 3600, stop_pct: 1.5,  tp_pct: 2.5,  risk_pct: 0.6,  max_lev: 2, min_conf: 0.8}
-  trump_policy:   {hold_s: 3600, stop_pct: 1.5,  tp_pct: 2.5,  risk_pct: 0.6,  max_lev: 2, min_conf: 0.8}
-  listing_hl:     {hold_s: 600,  stop_pct: 3.0,  tp_pct: 4.0,  risk_pct: 0.3,  max_lev: 2, min_conf: 0.9}
-  earnings:       {hold_s: 7200, stop_pct: 2.0,  tp_pct: 3.0,  risk_pct: 0.6,  max_lev: 3, min_conf: 0.8}
-  guidance:       {hold_s: 7200, stop_pct: 2.0,  tp_pct: 3.0,  risk_pct: 0.6,  max_lev: 3, min_conf: 0.8}
+  macro_cpi:      {hold_s: 1800, stop_pct: 0.8,  tp_pct: 1.2,  risk_pct: 0.5,  max_lev: 3, min_conf: 0.8, max_news_age_s: 120}
+  macro_nfp:      {hold_s: 3600, stop_pct: 0.9,  tp_pct: 1.2,  risk_pct: 0.4,  max_lev: 2, min_conf: 0.8, max_news_age_s: 120}
+  macro_fomc:     {hold_s: 3600, stop_pct: 1.0,  tp_pct: 1.2,  risk_pct: 0.4,  max_lev: 2, min_conf: 0.8, max_news_age_s: 180}
+  hack_exploit:   {hold_s: 5400, stop_pct: 1.5,  tp_pct: 2.5,  risk_pct: 0.8,  max_lev: 3, min_conf: 0.8, alert: true, max_news_age_s: 600}
+  depeg:          {hold_s: 5400, stop_pct: 1.5,  tp_pct: 2.5,  risk_pct: 0.6,  max_lev: 2, min_conf: 0.85, max_news_age_s: 600}
+  etf:            {hold_s: 3600, stop_pct: 1.5,  tp_pct: 2.0,  risk_pct: 0.5,  max_lev: 2, min_conf: 0.85, max_news_age_s: 600}
+  regulatory:     {hold_s: 3600, stop_pct: 1.5,  tp_pct: 2.0,  risk_pct: 0.5,  max_lev: 2, min_conf: 0.85, max_news_age_s: 600}
+  tariff:         {hold_s: 3600, stop_pct: 1.5,  tp_pct: 2.5,  risk_pct: 0.6,  max_lev: 2, min_conf: 0.8, max_news_age_s: 600}
+  trump_policy:   {hold_s: 3600, stop_pct: 1.5,  tp_pct: 2.5,  risk_pct: 0.6,  max_lev: 2, min_conf: 0.8, max_news_age_s: 600}
+  listing_hl:     {hold_s: 600,  stop_pct: 3.0,  tp_pct: 4.0,  risk_pct: 0.3,  max_lev: 2, min_conf: 0.9, max_news_age_s: 60}
+  earnings:       {hold_s: 7200, stop_pct: 2.0,  tp_pct: 3.0,  risk_pct: 0.6,  max_lev: 3, min_conf: 0.8, max_news_age_s: 1800}
+  guidance:       {hold_s: 7200, stop_pct: 2.0,  tp_pct: 3.0,  risk_pct: 0.6,  max_lev: 3, min_conf: 0.8, max_news_age_s: 1800}
+  # Sector supply news diffuses slowly (Toshiba HDD 2026-10-01: Nikkei 21:59 UTC, first leg on HL 10:50 UTC next day,
+  # -13% by the US open). Hold must span the next US session. Alert-only until you have decided to trade it.
+  supply_expansion: {hold_s: 64800, stop_pct: 3.0, tp_pct: 5.0, risk_pct: 0.5, max_lev: 2, min_conf: 0.7, alert: true, trade: false, max_news_age_s: 14400}
+  supply_cut:       {hold_s: 64800, stop_pct: 3.0, tp_pct: 5.0, risk_pct: 0.5, max_lev: 2, min_conf: 0.7, alert: true, trade: false, max_news_age_s: 14400}
   # m_and_a: intentionally no template. Rules cannot tell acquirer from target; LLM lane output for this class is logged only.
 
 storage:
   sqlite_path: data/hlnews.db
   log_path: data/hlnews.log
+
+# Alerts: always written to the alerts table and the log. Telegram needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in
+# the environment (Bot API sendMessage; no user session needed). macOS notification uses osascript when running on a Mac.
+alerts:
+  on: [key_news, open, close, halt]   # key_news = any template with alert: true
+  dedup_s: 21600                      # one key-news alert per (class, tickers, direction) per 6 h; re-reports are logged, not pushed
+  telegram: true
+  macos_notification: true
 
 # Hyperliquid weekly upgrade: post-only window (observed Fri 08:00-09:30 UTC, Aug-Sep 2026). Flatten 5 min before, no new entries inside.
 maintenance_window:

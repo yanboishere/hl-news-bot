@@ -9,7 +9,8 @@ import time
 from collections import deque
 from typing import AsyncIterator
 
-from .classify import RuleContext, classify_llm, classify_rules
+from .alerts import Alerter
+from .classify import RuleContext, classify_llm, classify_rules, is_trusted_source
 from .hl import HLClient
 from .models import Classification, Direction, EventClass, NewsItem, Position, Signal, new_id, now_ms
 from .risk import AccountState, RiskGate
@@ -20,11 +21,20 @@ log = logging.getLogger("engine")
 _WS = re.compile(r"\s+")
 
 
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
+
+
 def _fingerprint(title: str) -> str:
-    """Near-duplicate key: lowercase, strip handles/urls/punctuation, first 12 words."""
+    """Near-duplicate key. Latin text: lowercase, strip handles/urls/punctuation, first 12 words.
+    CJK text has no word boundaries: use the first 24 CJK/alnum characters plus every number in the text,
+    so a Chinese flash and its re-post fold together while two different items about the same company do not."""
     t = title.lower()
     t = re.sub(r"https?://\S+", "", t)
     t = re.sub(r"^[^:]{0,60}\(@[a-z0-9_]+\):\s*", "", t)  # drop "Name (@handle):" prefix
+    if len(_CJK_RE.findall(t)) >= 6:
+        chars = re.sub(r"[^\u3040-\u30ff\u3400-\u9fffa-z0-9]", "", t)
+        nums = "".join(re.findall(r"\d+(?:\.\d+)?", t)[:6])
+        return hashlib.sha1((chars[:24] + "|" + nums).encode()).hexdigest()[:16]
     t = re.sub(r"[^a-z0-9\s%$.]", " ", t)
     words = _WS.sub(" ", t).strip().split(" ")[:12]
     return hashlib.sha1(" ".join(words).encode()).hexdigest()[:16]
@@ -50,16 +60,19 @@ class Dedup:
 
 
 class Corroboration:
-    """Track (event_class, coin, direction) sightings so 'two sources' rules can be applied."""
+    """Track (event_class, coin, direction) sightings so 'two sources' rules can be applied.
+    The window is per event class: a hack has a second source within 90 s, a Nikkei capacity story may take an hour."""
 
-    def __init__(self, window_s: float):
+    def __init__(self, window_s: float, by_class: dict[str, float] | None = None):
         self.window_ms = int(window_s * 1000)
+        self.by_class = {k: int(v * 1000) for k, v in (by_class or {}).items()}
         self.hits: dict[tuple[str, str, str], list[tuple[int, str]]] = {}
 
     def add(self, c: Classification, coin: str, source_key: str, ts: int) -> int:
         k = (c.event_class.value, coin, c.direction.value)
+        win = self.by_class.get(c.event_class.value, self.window_ms)
         lst = self.hits.setdefault(k, [])
-        lst[:] = [(t, s) for (t, s) in lst if ts - t <= self.window_ms]
+        lst[:] = [(t, s) for (t, s) in lst if ts - t <= win]
         if all(s != source_key for _, s in lst):
             lst.append((ts, source_key))
         return len({s for _, s in lst})
@@ -78,9 +91,14 @@ class Engine:
             aliases={k.lower(): v for k, v in cfg["universe"]["ticker_aliases"].items()},
             universe=uni,
             trusted_accounts=set(rules_cfg.get("trusted_accounts", [])),
+            sectors=cfg.get("sectors") or {},
+            strong_publishers=set(rules_cfg.get("strong_publishers", [])),
         )
         self.require_two = set(rules_cfg.get("require_two_sources_for", []))
-        self.corr = Corroboration(float(rules_cfg.get("corroboration_window_s", 90)))
+        self.corr = Corroboration(float(rules_cfg.get("corroboration_window_s", 90)), rules_cfg.get("corroboration_window_by_class") or {})
+        self.alerter = Alerter(cfg, store)
+        self._alert_recent: dict[tuple[str, str, str], int] = {}
+        self.alert_dedup_ms = int(float((cfg.get("alerts") or {}).get("dedup_s", 21600)) * 1000)
         self.dedup = Dedup()
         self.templates = cfg["templates"]
         self.llm_cfg = cfg["classifier"]["llm"]
@@ -93,6 +111,7 @@ class Engine:
         self._order_failures = 0
         self._last_news_ms = 0
         self.max_age_s = float(cfg["feeds"].get("max_age_s", 20))
+        self.max_age_by_source = {k: float(v) for k, v in (cfg["feeds"].get("max_age_by_source") or {}).items()}
         mw = cfg.get("maintenance_window") or {}
         self.mw_enabled = bool(mw.get("enabled", True))
         self.mw_weekday = int(mw.get("weekday_utc", 4))          # 4 = Friday
@@ -225,7 +244,7 @@ class Engine:
     async def handle(self, item: NewsItem) -> list[Signal]:
         self.store.news(item)
         self._last_news_ms = item.recv_ms
-        if item.source != "replay" and item.age_s > self.max_age_s:
+        if item.source != "replay" and item.age_s > self.max_age_by_source.get(item.source, self.max_age_s):
             log.debug("stale (%.1fs) %s", item.age_s, item.title[:80])
             return []
         if self.dedup.is_dup(item):
@@ -257,13 +276,19 @@ class Engine:
         template = self.templates.get(final.event_class.value)
         if not template:
             return []
+        # per-class freshness: a 2-hour-old hack headline must not enter a 90-minute template; a 2-hour-old capacity story may
+        max_news_age = template.get("max_news_age_s")
+        if item.source != "replay" and max_news_age is not None and item.age_s > float(max_news_age):
+            log.info("too old for %s (%.0fs > %ss): %s", final.event_class.value, item.age_s, max_news_age, item.title[:80])
+            return []
         signals: list[Signal] = []
+        trusted = is_trusted_source(item, self.ctx)
+        alerted = False
         for coin in final.tickers:
             if coin not in self.ctx.universe and final.event_class is not EventClass.LISTING_HL:
                 continue
             src_key = f"{item.source}:{item.account or item.channel}"
             n_sources = self.corr.add(final, coin, src_key, item.recv_ms)
-            trusted = (item.account or "").lower() in {a.lower() for a in self.ctx.trusted_accounts} or item.channel in {"Binance EN", "Upbit", "Bithumb", "usGov"}
             if final.event_class.value in self.require_two and not trusted and n_sources < 2:
                 log.info("waiting for corroboration (%d source) %s %s: %s", n_sources, final.event_class.value, coin, item.title[:90])
                 continue
@@ -274,6 +299,24 @@ class Engine:
             )
             self.store.signal(sig)
             signals.append(sig)
+            # key-news alert: once per headline, only when the signal clears the class threshold, and not again for the
+            # same (class, coins, direction) within alerts.dedup_s -- a Nikkei story is re-reported by ten outlets over a day
+            akey = (final.event_class.value, " ".join(sorted(c for c in final.tickers if c in self.ctx.universe)), final.direction.value)
+            fresh = now_ms() - self._alert_recent.get(akey, 0) > self.alert_dedup_ms
+            if template.get("alert") and not alerted and fresh and final.confidence >= float(template.get("min_conf", 0.8)):
+                alerted = True
+                self._alert_recent[akey] = now_ms()
+                coins = [c for c in final.tickers if c in self.ctx.universe]
+                await self.alerter.send(
+                    "key_news",
+                    f"{final.event_class.value} {final.direction.value} {' '.join(coins)}",
+                    f"{item.title[:300]}\n来源 {item.channel}{(' @' + item.account) if item.account and item.account != item.channel else ''} · 置信 {final.confidence:.2f} · {final.reason}"
+                    + ("" if template.get("trade", True) else "\n（仅报警，模板 trade: false）"),
+                    {"news_id": item.id, "url": item.url, "coins": coins, "confidence": final.confidence, "trade": bool(template.get("trade", True))},
+                )
+            if template.get("trade", True) is False:
+                self.store.decision(sig.id, False, "alert-only template (trade: false)", now_ms())
+                continue
             await self._execute(sig)
         return signals
 
@@ -354,6 +397,10 @@ class Engine:
         log.info("OPEN %s %s %s size=%.5f @ %.4f notional=$%.0f (%.2fx equity, margin lev %dx) stop=%.4f tp=%s hold=%ss news_age=%.1fs slip=%.1fbps",
                  self.mode.upper(), sig.direction.value, sig.coin, pos.size, pos.entry_px, pos.notional_usd, dec.equity_ratio, int(pos.leverage),
                  pos.stop_px, f"{pos.tp_px:.4f}" if pos.tp_px else None, sig.template["hold_s"], sig.news_age_s, pos.slippage_bps)
+        await self.alerter.send("open", f"开仓 {sig.direction.value} {sig.coin}",
+                                f"{pos.size:g} @ {pos.entry_px:.4g}，名义 ${pos.notional_usd:.0f}，止损 {pos.stop_px:.4g}，止盈 {pos.tp_px:.4g}，持有 {int(sig.template['hold_s']) // 60} 分钟\n{sig.reason}" if pos.tp_px else
+                                f"{pos.size:g} @ {pos.entry_px:.4g}，名义 ${pos.notional_usd:.0f}，止损 {pos.stop_px:.4g}\n{sig.reason}",
+                                {"position_id": pos.id, "signal_id": sig.id, "coin": sig.coin})
 
     async def _manage_positions(self) -> None:
         """Paper: emulate stop/TP on mid. Live: TP + time stop here, stop is on-exchange (we still mirror it).
@@ -401,6 +448,11 @@ class Engine:
             log.warning("HALTED: %s", self.state.halted_reason)
         log.info("CLOSE %s %s %s @ %.4f reason=%s pnl=$%.2f fees=$%.2f equity=$%.2f", self.mode.upper(), pos.direction.value, pos.coin,
                  pos.exit_px or 0.0, reason, pos.pnl_usd or 0.0, pos.fee_usd, self.state.equity_usd)
+        await self.alerter.send("close", f"平仓 {pos.direction.value} {pos.coin}：{reason}",
+                                f"@ {pos.exit_px or 0:.4g}，盈亏 {pos.pnl_usd or 0:+.2f}（含费 {pos.fee_usd:.2f}），权益 {self.state.equity_usd:.2f}",
+                                {"position_id": pos.id, "coin": pos.coin, "pnl_usd": pos.pnl_usd})
+        if self.state.halted_reason and self.state.halted_reason.startswith("daily"):
+            await self.alerter.send("halt", "熔断", self.state.halted_reason, {})
 
     async def shutdown(self) -> None:
         if self.state.open:

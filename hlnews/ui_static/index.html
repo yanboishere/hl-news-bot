@@ -103,6 +103,13 @@
   svg.spark { display: block; width: 100%; height: 72px; }
   .spark-meta { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--ink-3); margin-top: 4px; }
   .empty { color: var(--ink-3); padding: 18px 0; }
+  .alerts { border-top: 1px solid var(--rule); }
+  .alert-row { display: grid; grid-template-columns: 64px 92px 1fr; gap: 0 14px; padding: 9px 0; border-bottom: 1px solid var(--rule-2); align-items: baseline; }
+  .alert-row .when { color: var(--ink-3); font-size: 13px; }
+  .alert-row .kind { font-size: 13px; color: var(--ink-2); }
+  .alert-row .kind.key { color: var(--accent); font-weight: 600; }
+  .alert-row .what b { font-weight: 600; }
+  .alert-row .what .body { display: block; color: var(--ink-2); font-size: 13.5px; margin-top: 2px; white-space: pre-line; }
   .tmpl input { width: 72px; padding: 3px 6px; border: 1px solid var(--rule-2); background: #fff; border-radius: 2px; text-align: right; }
   .tmpl input.changed { border-color: var(--ink); }
   @media (prefers-reduced-motion: no-preference) { button.act, button.lite { transition: background .12s, color .12s, border-color .12s; } }
@@ -162,12 +169,12 @@ const fmt = {
 const CLASS_ZH = {
   macro_cpi: "CPI", macro_nfp: "非农", macro_fomc: "FOMC", listing_binance: "币安上币", listing_upbit: "Upbit 上币", listing_coinbase: "Coinbase 上币",
   listing_hl: "HL 新上币", hack_exploit: "黑客 / exploit", depeg: "脱锚", etf: "ETF", regulatory: "监管", tariff: "关税", trump_policy: "特朗普政策",
-  earnings: "财报", guidance: "指引", m_and_a: "并购", noise: "噪音",
+  earnings: "财报", guidance: "指引", m_and_a: "并购", supply_expansion: "同业扩产", supply_cut: "同业减产", noise: "噪音",
 };
 const EXIT_ZH = { stop: "止损", take_profit: "止盈", time_stop: "时间止损", pre_maintenance: "维护窗口前平仓", shutdown: "进程退出平仓" };
 
 // ------------------------------------------------------------------ state
-const S = { view: "overview", state: null, bot: null, summary: null, tape: [], tapeDirectional: false, tapeQuery: "", expanded: new Set(), equity: [], openPos: [], closedPos: [], log: [], logGrep: "", logAuto: true, cfg: null, cfgText: "", oneshot: null, bt: null, tmplEdits: {} };
+const S = { view: "overview", state: null, bot: null, summary: null, alerts: [], tape: [], tapeDirectional: false, tapeQuery: "", expanded: new Set(), equity: [], openPos: [], closedPos: [], log: [], logGrep: "", logAuto: true, cfg: null, cfgText: "", oneshot: null, bt: null, tmplEdits: {} };
 const $ = sel => document.querySelector(sel);
 const main = $("#main");
 
@@ -177,7 +184,7 @@ async function refreshState() {
   try { const r = await api("/api/state"); S.state = r.state; S.bot = r.bot; renderPulse(); if (S.view === "overview" || S.view === "control") renderStatusOnly(); } catch (e) { $("#pulse").innerHTML = `<span class="warn">连不上本地服务。</span><br>在仓库目录运行 <b>python -m hlnews.ui</b>`; }
 }
 async function refreshView() {
-  if (S.view === "overview") { const [s, t, e, o] = await Promise.all([api("/api/summary"), api("/api/tape?limit=8"), api("/api/equity?hours=24"), api("/api/positions?status=open")]); S.summary = s; S.tape = t; S.equity = e; S.openPos = o; render(); }
+  if (S.view === "overview") { const [s, t, e, o, al] = await Promise.all([api("/api/summary"), api("/api/tape?limit=8"), api("/api/equity?hours=24"), api("/api/positions?status=open"), api("/api/alerts?limit=20")]); S.summary = s; S.tape = t; S.equity = e; S.openPos = o; S.alerts = al; render(); }
   else if (S.view === "tape") { S.tape = await api(`/api/tape?limit=150&directional=${S.tapeDirectional ? 1 : 0}`); render(); }
   else if (S.view === "control") { const [c, l, os] = await Promise.all([api("/api/config"), api(`/api/log?lines=200&grep=${encodeURIComponent(S.logGrep)}`), api("/api/oneshot")]); S.cfg = c.parsed; S.cfgText = c.text; S.log = l; S.oneshot = os; render(); }
   else if (S.view === "backtest") { S.bt = await api("/api/backtest"); render(); }
@@ -278,6 +285,15 @@ function tapeDetail(r) {
       <dt>id</dt><dd class="mono">${fmt.esc(r.id)}</dd>
     </dl></div>`;
 }
+const KIND_ZH = { key_news: "关键新闻", open: "开仓", close: "平仓", halt: "熔断" };
+function alertsPanel(rows) {
+  if (!rows || !rows.length) return `<div class="empty">还没有报警。关键新闻类（模板里 alert: true）、开仓、平仓、熔断会出现在这里；Telegram / macOS 通知在 config.yaml 的 alerts 里开关。</div>`;
+  return `<div class="alerts">${rows.map(a => `<div class="alert-row">
+    <span class="when" title="${fmt.dt(a.ts_ms)}">${fmt.age(Date.now() - a.ts_ms)}前</span>
+    <span class="kind ${a.kind === "key_news" ? "key" : ""}">${KIND_ZH[a.kind] || a.kind}</span>
+    <span class="what"><b>${fmt.esc(a.title)}</b><span class="body">${fmt.esc(a.body)}</span>${a.meta && a.meta.url ? ` <a href="${fmt.esc(a.meta.url)}" target="_blank" rel="noopener" class="quiet">原文</a>` : ""}</span>
+  </div>`).join("")}</div>`;
+}
 function viewOverview() {
   const s = S.summary || {}; const td = s.today || {}; const all = s.all || {};
   const openRows = (S.openPos || []).map(p => {
@@ -294,6 +310,9 @@ function viewOverview() {
     ${statusLede()}
     ${statusAlert()}
     ${s.empty ? `<p>数据库还不存在。启动 bot 或跑一次回放之后这里会有内容。</p>` : ""}
+
+    <h2>报警</h2>
+    ${alertsPanel(S.alerts)}
 
     <h2>最近决策</h2>
     <div class="tape">${(S.tape || []).map(r => tapeRow(r, true)).join("") || `<div class="empty">还没有新闻进来。bot 启动后几分钟内会出现第一条，大部分会是「噪音」。</div>`}</div>

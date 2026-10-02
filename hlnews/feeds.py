@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import random
+import re
 import time
 from typing import AsyncIterator
 
@@ -204,3 +206,135 @@ async def replay_feed(path: str, speed: float = 0.0) -> AsyncIterator[NewsItem]:
                 suggestions=[c.upper() for c in d.get("suggestions", [])],
                 raw=d,
             )
+
+
+# --------------------------------------------------------------------------- Google News RSS (equities / sector news)
+async def google_news_feed(queries: list[str], poll_s: float = 90.0, hl: str = "en-US") -> AsyncIterator[NewsItem]:
+    """Poll Google News RSS search for each query. Free, no key, publisher timestamp in pubDate.
+
+    Why: Tree of Alpha is a crypto feed. Nikkei / Reuters / digitimes equity stories (e.g. Toshiba doubling HDD capacity,
+    2026-10-01 21:59 UTC) never appear there, but are indexed by Google News within minutes. The edge on this kind of
+    news is coverage and mapping, not latency: the Hyperliquid WDC perp did not react for 13 hours.
+    """
+    import email.utils
+    import html as _html
+    import urllib.parse
+    import urllib.request
+
+    gl, ceid = ("CN", "CN:zh-Hans") if hl.startswith("zh") else (("JP", "JP:ja") if hl.startswith("ja") else ("US", "US:en"))
+    seen: dict[str, int] = {}
+    first = True
+
+    def fetch(q: str) -> list[tuple[int, str, str, str, str]]:
+        url = f"https://news.google.com/rss/search?q={urllib.parse.quote(q + ' when:1d')}&hl={hl}&gl={gl}&ceid={ceid}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (hl-news-bot)"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            raw = r.read().decode("utf-8", "ignore")
+        out = []
+        for it in re.findall(r"<item>(.*?)</item>", raw, re.S):
+            t = re.search(r"<title>(.*?)</title>", it, re.S)
+            p = re.search(r"<pubDate>(.*?)</pubDate>", it)
+            l = re.search(r"<link>(.*?)</link>", it) or re.search(r"<guid[^>]*>(.*?)</guid>", it)
+            src = re.search(r"<source[^>]*>(.*?)</source>", it)
+            if not (t and p):
+                continue
+            try:
+                ts = int(email.utils.parsedate_to_datetime(p.group(1)).timestamp() * 1000)
+            except Exception:  # noqa: BLE001
+                continue
+            title = _html.unescape(re.sub(r"<!\[CDATA\[|\]\]>", "", t.group(1))).strip()
+            pub = _html.unescape(src.group(1)).strip() if src else ""
+            # Google appends " - Publisher" to titles; strip it since the publisher is carried separately
+            if pub and title.endswith(" - " + pub):
+                title = title[: -(len(pub) + 3)].rstrip()
+            out.append((ts, title, l.group(1).strip() if l else "", pub, q))
+        return out
+
+    loop = asyncio.get_running_loop()
+    while True:
+        for q in queries:
+            try:
+                items = await loop.run_in_executor(None, fetch, q)
+            except Exception as e:  # noqa: BLE001
+                log.warning("google news fetch failed for %r: %s", q, e)
+                items = []
+            for ts, title, link, pub, query in sorted(items):
+                key = link or (pub + "|" + title)
+                if key in seen:
+                    continue
+                seen[key] = ts
+                if first:
+                    continue  # baseline: do not replay yesterday's index on startup
+                yield NewsItem(
+                    id="gn_" + hashlib.sha1(key.encode()).hexdigest()[:16],
+                    source="google_news",
+                    channel=pub or "Google News",
+                    title=title,
+                    url=link,
+                    ts_ms=ts,
+                    recv_ms=now_ms(),
+                    account=pub or None,
+                    suggestions=[],
+                    raw={"query": query, "publisher": pub},
+                )
+            await asyncio.sleep(1.0)
+        first = False
+        if len(seen) > 5000:
+            for k in sorted(seen, key=seen.get)[:2000]:
+                seen.pop(k, None)
+        await asyncio.sleep(poll_s)
+
+
+# --------------------------------------------------------------------------- 华尔街见闻 7x24
+async def wallstreetcn_feed(poll_s: float = 60.0) -> AsyncIterator[NewsItem]:
+    """华尔街见闻 live feed (Chinese, ~370 items/day, no key). display_time is unix seconds.
+    Chinese financial flash news often carries the same number as the English wire within the same minute, and it
+    covers Asian company news (Toshiba, SK Hynix, CXMT) that English crypto feeds skip."""
+    import urllib.request
+
+    url = "https://api-one.wallstcn.com/apiv1/content/lives?channel=global-channel&client=pc&limit=40"
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # direct: the site is reachable without the proxy
+    seen: set[str] = set()
+    first = True
+    loop = asyncio.get_running_loop()
+
+    def fetch() -> list[dict]:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (hl-news-bot)"})
+        with opener.open(req, timeout=20) as r:
+            d = json.loads(r.read())
+        return d.get("data", {}).get("items", [])
+
+    while True:
+        try:
+            items = await loop.run_in_executor(None, fetch)
+        except Exception as e:  # noqa: BLE001
+            log.warning("wallstreetcn fetch failed: %s", e)
+            items = []
+        for it in sorted(items, key=lambda x: int(x.get("display_time", 0))):
+            iid = str(it.get("id") or it.get("display_time"))
+            if iid in seen:
+                continue
+            seen.add(iid)
+            if first:
+                continue
+            title = (it.get("title") or "").strip()
+            body = re.sub(r"<[^>]+>", "", it.get("content_text") or it.get("content") or "").strip()
+            text = f"{title} {body}".strip() if title and body and not body.startswith(title) else (body or title)
+            if not text:
+                continue
+            yield NewsItem(
+                id="wscn_" + iid,
+                source="wallstreetcn",
+                channel="华尔街见闻",
+                title=text[:600],
+                url=it.get("uri") or f"https://wallstreetcn.com/livenews/{iid}",
+                ts_ms=int(it.get("display_time", 0)) * 1000,
+                recv_ms=now_ms(),
+                account="华尔街见闻",
+                suggestions=[],
+                raw={"id": iid},
+            )
+        first = False
+        if len(seen) > 5000:
+            seen = set(list(seen)[-2000:])
+        await asyncio.sleep(poll_s)
