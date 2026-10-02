@@ -66,7 +66,10 @@ async def main_async(cfg: dict, args: argparse.Namespace) -> None:
             feed_list.append(F.google_news_feed(list(gn.get("queries") or []), poll_s=float(gn.get("poll_s", 90)), hl=str(gn.get("hl", "en-US"))))
         ws = fc.get("wallstreetcn") or {}
         if ws.get("enabled"):
-            feed_list.append(F.wallstreetcn_feed(poll_s=float(ws.get("poll_s", 60))))
+            feed_list.append(F.wallstreetcn_feed(poll_s=float(ws.get("poll_s", 15)), fast_poll_s=float(ws.get("fast_poll_s", 5))))
+        c = fc.get("cls") or {}
+        if c.get("enabled"):
+            feed_list.append(F.cls_feed(poll_s=float(c.get("poll_s", 3)), fast_poll_s=float(c.get("fast_poll_s", 1))))
     engine = Engine(cfg, store, hl, feed_list)
     if not args.replay:
         j10 = fc.get("jin10") or {}
@@ -78,7 +81,7 @@ async def main_async(cfg: dict, args: argparse.Namespace) -> None:
                     await engine.alerter.send("feed", "金十数据源恢复", detail, {"source": "jin10", "status": status})
                 if status in ("ws_down", "rest_fail"):
                     engine.feed_was_down["jin10"] = True
-            engine.add_feed(F.jin10_feed(poll_s=float(j10.get("poll_s", 10)), url=j10.get("url") or F.JIN10_FLASH_URL,
+            engine.add_feed(F.jin10_feed(poll_s=float(j10.get("poll_s", 5)), fast_poll_s=float(j10.get("fast_poll_s", 2)), url=j10.get("url") or F.JIN10_FLASH_URL,
                                          headers=j10.get("headers") or None, types=tuple(j10.get("types") or (0, 1)),
                                          ws=bool(j10.get("ws", True)), ws_url=str(j10.get("ws_url") or F.JIN10_WS_URL), on_health=_j10_health))
 

@@ -82,10 +82,15 @@ def _mentions(text_low: str, name: str) -> bool:
     return _mention_pos(text_low, name) >= 0
 
 
+_DIGEST = re.compile(r"要闻一览|要闻汇总|新闻汇总|早报|晚报|午报|日报[:：】]|盘前瞻|前瞻[:：】]|今日看点|复盘|回顾|大事提醒|财经早餐|roundup|recap|week in review|top stories|morning brief", re.I)
+
+
 def classify_sector(item: NewsItem, ctx: RuleContext, trusted: bool) -> Classification | None:
     """Capacity expansion / cut by a maker -> direction for its tradeable peers. Returns None when nothing matches."""
     t0 = time.perf_counter()
     text = item.title
+    if _DIGEST.search(text[:60]):
+        return None   # roundup / digest items repeat hours-old news and must not re-trigger the sector rule
     low = text.lower()
     for sector, sc in (ctx.sectors or {}).items():
         mentions = {m: _mention_pos(low, m) for m in sc.get("makers", []) if _mentions(low, m)}

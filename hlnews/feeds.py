@@ -14,6 +14,27 @@ from .models import NewsItem, new_id, now_ms
 
 log = logging.getLogger("feeds")
 
+# --------------------------------------------------------------------------- hot window
+# While "hot", polling feeds tighten their interval to fast_poll_s: around scheduled macro releases and for a couple
+# of minutes after any directional headline, so corroborating sources are fetched at ~1 s instead of the idle cadence.
+_HOT_UNTIL_MS = 0
+
+
+def set_hot(duration_s: float) -> None:
+    global _HOT_UNTIL_MS
+    until = now_ms() + int(duration_s * 1000)
+    if until > _HOT_UNTIL_MS:
+        _HOT_UNTIL_MS = until
+        log.info("hot window until +%.0fs: polling feeds switch to fast interval", duration_s)
+
+
+def is_hot() -> bool:
+    return now_ms() < _HOT_UNTIL_MS
+
+
+def poll_interval(normal_s: float, fast_s: float) -> float:
+    return fast_s if is_hot() else normal_s
+
 
 # --------------------------------------------------------------------------- Tree of Alpha
 def parse_toa(d: dict) -> NewsItem | None:
@@ -286,7 +307,7 @@ async def google_news_feed(queries: list[str], poll_s: float = 90.0, hl: str = "
 
 
 # --------------------------------------------------------------------------- 华尔街见闻 7x24
-async def wallstreetcn_feed(poll_s: float = 60.0) -> AsyncIterator[NewsItem]:
+async def wallstreetcn_feed(poll_s: float = 15.0, fast_poll_s: float = 5.0) -> AsyncIterator[NewsItem]:
     """华尔街见闻 live feed (Chinese, ~370 items/day, no key). display_time is unix seconds.
     Chinese financial flash news often carries the same number as the English wire within the same minute, and it
     covers Asian company news (Toshiba, SK Hynix, CXMT) that English crypto feeds skip."""
@@ -337,7 +358,7 @@ async def wallstreetcn_feed(poll_s: float = 60.0) -> AsyncIterator[NewsItem]:
         first = False
         if len(seen) > 5000:
             seen = set(list(seen)[-2000:])
-        await asyncio.sleep(poll_s)
+        await asyncio.sleep(poll_interval(poll_s, fast_poll_s))
 
 
 # --------------------------------------------------------------------------- 金十数据 flash (web API)
@@ -432,8 +453,8 @@ def _jin10_login_frame(last_id: str | None = None) -> bytes:
     return f
 
 
-async def jin10_feed(poll_s: float = 10.0, url: str = JIN10_FLASH_URL, headers: dict | None = None, types: tuple[int, ...] = (0, 1),
-                     ws: bool = True, ws_url: str = JIN10_WS_URL, on_health=None) -> AsyncIterator[NewsItem]:
+async def jin10_feed(poll_s: float = 5.0, fast_poll_s: float = 2.0, url: str = JIN10_FLASH_URL, headers: dict | None = None,
+                     types: tuple[int, ...] = (0, 1), ws: bool = True, ws_url: str = JIN10_WS_URL, on_health=None) -> AsyncIterator[NewsItem]:
     """金十数据 7x24 快讯. WebSocket push (the jin10.com front end's own socket) with REST polling as a safety net.
 
     Protocol (reverse-read from the front end, 2026-10-03): raw WebSocket; the first server frame is 4 x uint32 LE, the
@@ -503,7 +524,7 @@ async def jin10_feed(poll_s: float = 10.0, url: str = JIN10_FLASH_URL, headers: 
                 log.warning("jin10 REST fetch failed (%d): %s", state["rest_fail"], e)
                 if state["rest_fail"] == 5 and not state["ws_up"]:
                     await health("rest_fail", f"REST failed 5x and WS is down: {e}")
-            await asyncio.sleep(poll_s)
+            await asyncio.sleep(poll_interval(poll_s, fast_poll_s))
 
     async def ws_loop() -> None:
         import websockets
@@ -584,3 +605,85 @@ async def jin10_feed(poll_s: float = 10.0, url: str = JIN10_FLASH_URL, headers: 
     finally:
         for t in tasks:
             t.cancel()
+
+
+# --------------------------------------------------------------------------- 财联社电报 (CLS telegraph roll)
+CLS_ROLL_URL = "https://www.cls.cn/v1/roll/get_roll_list"
+
+
+def _cls_params(extra: dict | None = None) -> str:
+    """CLS request signing: sign = md5(sha1(urlencode(sorted params)))."""
+    import hashlib
+    import urllib.parse
+
+    p = {"app": "CailianpressWeb", "os": "web", "sv": "8.4.6", "category": "", "refresh_type": "1", "rn": "20", "last_time": ""}
+    if extra:
+        p.update(extra)
+    qs = urllib.parse.urlencode(dict(sorted(p.items())))
+    p["sign"] = hashlib.md5(hashlib.sha1(qs.encode()).hexdigest().encode()).hexdigest()
+    return urllib.parse.urlencode(p)
+
+
+def _cls_item_to_news(it: dict) -> NewsItem | None:
+    title = (it.get("title") or "").strip()
+    content = re.sub(r"<[^>]+>", "", it.get("content") or "").strip()
+    # content usually embeds the title as 【title】...; avoid doubling it
+    text = content if (title and title in content) else f"{title} {content}".strip()
+    if not text:
+        return None
+    return NewsItem(
+        id="cls_" + str(it.get("id")),
+        source="cls",
+        channel="财联社",
+        title=text[:600],
+        url=f"https://www.cls.cn/detail/{it.get('id')}",
+        ts_ms=int(it.get("ctime", 0)) * 1000 or now_ms(),
+        recv_ms=now_ms(),
+        account="财联社",
+        suggestions=[],
+        raw={"id": it.get("id"), "level": it.get("level"), "category": it.get("category"), "bold": it.get("bold")},
+    )
+
+
+async def cls_feed(poll_s: float = 3.0, fast_poll_s: float = 1.0) -> AsyncIterator[NewsItem]:
+    """财联社 7x24 电报 via the signed roll API the cls.cn front end polls (no WebSocket exists there).
+
+    Measured 2026-10-03: ~360 items/day, `level` B = highlighted / C = normal, NFP text posted 13 s after the BLS
+    release (Chinese prose with 预期/前值, not structured), pagination via last_time (several days of history).
+    It did NOT carry the Toshiba HDD origin story, only the pre-market reaction at 11:04 UTC, so it complements
+    jin10 as redundancy for Chinese flashes and CN-market corporate news rather than as a latency source.
+    Polling: `poll_s` idle, `fast_poll_s` inside a hot window. 25 requests at 1 Hz measured clean (all 200, 0.26 s)."""
+    import urllib.request
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # Chinese site: direct, not via the proxy
+    hdrs = {"User-Agent": "Mozilla/5.0 (hl-news-bot)", "Referer": "https://www.cls.cn/telegraph"}
+    seen: set = set()
+    first = True
+    loop = asyncio.get_running_loop()
+
+    def fetch() -> list[dict]:
+        req = urllib.request.Request(CLS_ROLL_URL + "?" + _cls_params(), headers=hdrs)
+        with opener.open(req, timeout=15) as r:
+            d = json.loads(r.read())
+        return (d.get("data") or {}).get("roll_data") or []
+
+    while True:
+        try:
+            items = await loop.run_in_executor(None, fetch)
+        except Exception as e:  # noqa: BLE001
+            log.warning("cls fetch failed: %s", e)
+            items = []
+        for it in sorted(items, key=lambda x: (x.get("ctime") or 0, str(x.get("id")))):
+            iid = it.get("id")
+            if iid is None or iid in seen:
+                continue
+            seen.add(iid)
+            if first:
+                continue
+            n = _cls_item_to_news(it)
+            if n is not None:
+                yield n
+        first = False
+        if len(seen) > 4000:
+            seen = set(list(seen)[-1500:])
+        await asyncio.sleep(poll_interval(poll_s, fast_poll_s))

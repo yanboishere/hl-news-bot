@@ -179,6 +179,10 @@ class MacroScheduler:
             nxt.consensus = cons.get(nxt.kind, {})
             self.set_consensus(nxt.kind, nxt.consensus)
             log.info("armed %s consensus=%s release at %s", nxt.kind, nxt.consensus, nxt.at_utc.isoformat())
+            await asyncio.sleep(max(0.0, (nxt.at_utc - datetime.now(timezone.utc)).total_seconds() - 30.0))
+            from .feeds import set_hot
+
+            set_hot(300)   # all polling feeds at fast interval from T-30s through T+270s
             await asyncio.sleep(max(0.0, (nxt.at_utc - datetime.now(timezone.utc)).total_seconds() - 2.0))
             await self._poll_release(nxt)
             self.releases = [r for r in self.releases if r is not nxt]

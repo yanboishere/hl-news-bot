@@ -36,6 +36,7 @@
 14. [可视化控制台与 macOS 客户端](#14-可视化控制台与-macos-客户端)
 15. [行业供给车道与关键新闻报警：东芝 HDD 案例](#15-行业供给车道与关键新闻报警东芝-hdd-案例)
 16. [金十数据：接口现状与接入](#16-金十数据接口现状与接入)
+17. [财联社接入与轮询分层（热窗口）](#17-财联社接入与轮询分层热窗口)
 
 **第二部分：架构设计与可行性结论**
 
@@ -1427,7 +1428,7 @@ feeds:
 
 ```yaml
 feeds:
-  jin10: {enabled: true, ws: true, ws_url: wss://wss-flash-2.jin10.com/, poll_s: 10, types: [0, 1]}
+  jin10: {enabled: true, ws: true, ws_url: wss://wss-flash-2.jin10.com/, poll_s: 5, fast_poll_s: 2, types: [0, 1]}
 ```
 
 "金十数据"已加入 `strong_publishers`。若买了开放平台，把 `feeds.jin10.url` 指到 `open-data-api.jin10.com/data-api/flash`、`headers` 填 `secret-key`、`ws: false` 即可，解析逻辑不变。
@@ -1435,6 +1436,45 @@ feeds:
 ### 注意
 
 每天约 880 条快讯都会过一遍规则（<1 ms/条）并落库；若同时开 LLM 慢车道，规则判噪音的中文快讯会全部送去 LLM，Haiku 约 $0.3–0.5/天，可在 `classifier.llm` 里按需关掉或将来加按源过滤。金十的 `type=1` 条目时间是它自己的入库时间，比源晚 2–4 秒；WS 推送把轮询间隔去掉了，宏观数据端到端约 2–5 秒。全源联跑实测（2026-10-03）：三条金十快讯的发布时间到本机接收分别为 0.0、0.2、0.3 秒。免费接口随时可能改字段或协议：REST 变了 `jin10_squawk` 对缺字段返回 `None` 跳过；WS 握手或帧格式变了会走重连退避并由 REST 兜底，进程不会挂。
+
+## 17. 财联社接入与轮询分层（热窗口）
+
+### 财联社
+
+财联社没有公开 API，旧的 `nodeapi/updateTelegraphList`、`nodeapi/telegraphList` 都已 404。现在网页前端用的是签名接口：
+
+```
+GET https://www.cls.cn/v1/roll/get_roll_list?app=CailianpressWeb&os=web&sv=8.4.6&category=&refresh_type=1&rn=20&last_time=&sign=…
+sign = md5(sha1(按 key 排序后的 querystring))
+```
+
+无需登录，0.2–0.3 秒一页 20 条，`last_time` 翻页可回溯数天，约 360 条/天，`level` B 为加红要闻（约 11%）。前端 JS 里没有任何 WebSocket，网页本身就是轮询，所以轮询已是该源的上限。
+
+两组实测定位它的价值：10-02 非农，财联社文字稿 `ctime` 12:30:13，比 BLS 发布晚 13 秒（这是编辑部延迟，轮询再快也只能逼近它；金十结构化条目是 +2–4 秒）；东芝 HDD 原始消息它完全没发，只在 11:04 UTC 发了"希捷西数盘前跳水"的反应稿。所以它的角色是金十/见闻的**冗余源**和 A 股/中国公司新闻的补充，不是延迟源。`cls_feed` 已接入（`feeds.cls`），"财联社"加入 `strong_publishers`，二源佐证时和金十互为独立来源。
+
+顺带修了一个它暴露的真问题：`【美股盘前要闻一览】`这类汇总稿会把十几小时前的东芝旧闻再触发一次行业供给信号。`classify_sector` 现在对标题前 60 字符出现"要闻一览/汇总/早报/盘前瞻/复盘/roundup/recap"等措辞的条目直接跳过。
+
+### 轮询分层与热窗口
+
+"每秒实时爬取"对不同源的意义不同：Tree of Alpha 和金十是 WS 推送（0–0.3 秒），没有轮询间隔可省；财联社/见闻的瓶颈分两段，编辑部延迟（财联社 NFP +13 秒）轮询无法改变，轮询间隔那一段才是可以压的。全天 1 秒轮询则是无谓的封禁风险（财联社 1 秒 = 8.6 万请求/天）。
+
+所以采用两档：**平时适度，热窗口 1 秒**。
+
+| 源 | 平时 | 热窗口 | 依据 |
+|---|---|---|---|
+| 财联社 | 3 s | **1 s** | 25 req @ 1 Hz 实测全 200、RTT 0.26 s；3 s 档约 2.9 万请求/天，若开始报错就调大 |
+| 华尔街见闻 | 15 s | 5 s | cursor 接口较重，未测更高频 |
+| 金十 REST（WS 兜底） | 5 s | 2 s | WS 为主，REST 只是保险 |
+| Google News / HL 上币 / 行情 | 不变 | 不变 | Google 高频必 429；HL 受 IP 权重限制（1,200/分钟） |
+
+热窗口（`feeds.set_hot`）由两处触发：宏观调度器在发布前 30 秒拉起 300 秒（覆盖 BLS 直采失败时从中继源抢数字的窗口）；引擎在**任何方向性标题**出现时拉起 120 秒——这一下所有轮询源提速，等第二来源佐证的时间也随之缩短。实跑中已验证：一条东芝相关的方向性标题到达后日志出现 `hot window until +120s`，财联社随即切到 1 秒轮询。
+
+```yaml
+feeds:
+  cls:          {enabled: true, poll_s: 3,  fast_poll_s: 1}
+  wallstreetcn: {enabled: true, poll_s: 15, fast_poll_s: 5}
+  jin10:        {enabled: true, ws: true, poll_s: 5, fast_poll_s: 2, types: [0, 1]}
+```
 
 ---
 

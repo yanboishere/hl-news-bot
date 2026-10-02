@@ -81,6 +81,7 @@ feeds:
     google_news: 10800        # Google sometimes indexes 1-2 h after pubDate; per-class max_news_age_s below decides what is still actionable
     wallstreetcn: 3600
     jin10: 900
+    cls: 900
   treeofalpha:
     enabled: true
     ws_url: wss://news.treeofalpha.com/ws
@@ -111,13 +112,19 @@ feeds:
     hl: en-US
   wallstreetcn:
     enabled: true             # 华尔街见闻 7x24 快讯, Chinese, ~370 items/day, no key
-    poll_s: 60
+    poll_s: 15
+    fast_poll_s: 5            # inside a hot window (macro release / after a directional headline)
   jin10:
     enabled: true             # 金十数据 7x24 快讯 (~880 items/day, no key). Data releases arrive 2-4 s after the source as
     ws: true                  # structured items and are rendered as English squawk lines for the macro rules.
     ws_url: wss://wss-flash-2.jin10.com/     # push (the jin10.com front end's socket); REST below is the safety net
-    poll_s: 10                # REST poll interval while WS is up; it is also the latency floor if WS is down
+    poll_s: 5                 # REST safety net while WS is up; also the latency floor if WS is down
+    fast_poll_s: 2
     types: [0, 1]             # 0 = text flash, 1 = data release; 2 (articles) skipped
+  cls:
+    enabled: true             # 财联社电报 (~360 items/day, signed roll API, no key; no WS exists). Redundancy for Chinese
+    poll_s: 3                 # flashes and CN corporate news; its NFP text was +13 s (editorial floor, polling cannot beat it).
+    fast_poll_s: 1            # 25 req @ 1 Hz measured clean; ~29k req/day at 3 s idle — if cls starts failing, raise poll_s
 
 classifier:
   llm:
@@ -159,6 +166,7 @@ classifier:
       - TrendForce
       - 华尔街见闻
       - 金十数据
+      - 财联社
 
 # Trade templates per event class. hold_s is the hard time stop. stop/tp are % of entry.
 # Optional flags: alert: true  -> push an alert when a directional signal of this class passes its min_conf

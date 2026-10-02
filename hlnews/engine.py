@@ -275,6 +275,9 @@ class Engine:
                     self.store.classification(item.id, final, now_ms())
         if final.event_class is EventClass.NOISE or final.direction is Direction.NONE or not final.tickers:
             return []
+        from .feeds import set_hot
+
+        set_hot(120)   # a directional headline arrived: fetch the polling sources fast so corroboration lands quickly
         if final.is_rumor:
             log.info("rumor, skip: %s", item.title[:100])
             return []
