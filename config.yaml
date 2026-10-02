@@ -106,15 +106,17 @@ feeds:
       - "Micron OR \"SK Hynix\" OR Samsung DRAM capacity"
       - "Kioxia OR SanDisk NAND"
       - "CXMT OR YMTC memory"
-      - "Nvidia export OR Nvidia China chips"
-      - "Tesla deliveries OR Tesla recall"
+      - "Nvidia export controls OR Nvidia H20 China"
+      - "Tesla quarterly deliveries OR Tesla NHTSA recall"
     hl: en-US
   wallstreetcn:
     enabled: true             # 华尔街见闻 7x24 快讯, Chinese, ~370 items/day, no key
     poll_s: 60
   jin10:
-    enabled: true             # 金十数据 7x24 快讯 (web endpoint, no key, ~880 items/day). Data releases arrive 2-4 s after
-    poll_s: 3                 # the source as structured items and are rendered as English squawk lines for the macro rules.
+    enabled: true             # 金十数据 7x24 快讯 (~880 items/day, no key). Data releases arrive 2-4 s after the source as
+    ws: true                  # structured items and are rendered as English squawk lines for the macro rules.
+    ws_url: wss://wss-flash-2.jin10.com/     # push (the jin10.com front end's socket); REST below is the safety net
+    poll_s: 10                # REST poll interval while WS is up; it is also the latency floor if WS is down
     types: [0, 1]             # 0 = text flash, 1 = data release; 2 (articles) skipped
 
 classifier:
@@ -188,7 +190,7 @@ storage:
 # Alerts: always written to the alerts table and the log. Telegram needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in
 # the environment (Bot API sendMessage; no user session needed). macOS notification uses osascript when running on a Mac.
 alerts:
-  on: [key_news, open, close, halt]   # key_news = any template with alert: true
+  on: [key_news, open, close, halt, feed]   # key_news = any template with alert: true; feed = a source went down / recovered
   dedup_s: 21600                      # one key-news alert per (class, tickers, direction) per 6 h; re-reports are logged, not pushed
   telegram: true
   macos_notification: true

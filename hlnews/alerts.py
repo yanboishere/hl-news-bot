@@ -24,7 +24,7 @@ log = logging.getLogger("alerts")
 class Alerter:
     def __init__(self, cfg: dict, store: Store):
         a = cfg.get("alerts") or {}
-        self.on = set(a.get("on") or ["key_news", "open", "close", "halt"])
+        self.on = set(a.get("on") or ["key_news", "open", "close", "halt", "feed"])
         self.telegram = bool(a.get("telegram", True))
         self.macos = bool(a.get("macos_notification", True)) and sys.platform == "darwin"
         self.token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -39,7 +39,7 @@ class Alerter:
         return kind in self.on
 
     async def send(self, kind: str, title: str, body: str, meta: dict | None = None) -> None:
-        """kind: key_news | open | close | halt. Never raises."""
+        """kind: key_news | open | close | halt | feed. Never raises."""
         if not self.enabled(kind):
             return
         ts = now_ms()

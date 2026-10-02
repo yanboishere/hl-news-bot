@@ -67,11 +67,20 @@ async def main_async(cfg: dict, args: argparse.Namespace) -> None:
         ws = fc.get("wallstreetcn") or {}
         if ws.get("enabled"):
             feed_list.append(F.wallstreetcn_feed(poll_s=float(ws.get("poll_s", 60))))
+    engine = Engine(cfg, store, hl, feed_list)
+    if not args.replay:
         j10 = fc.get("jin10") or {}
         if j10.get("enabled"):
-            feed_list.append(F.jin10_feed(poll_s=float(j10.get("poll_s", 3)), url=j10.get("url") or F.JIN10_FLASH_URL,
-                                          headers=j10.get("headers") or None, types=tuple(j10.get("types") or (0, 1))))
-    engine = Engine(cfg, store, hl, feed_list)
+            async def _j10_health(status: str, detail: str) -> None:
+                if status in ("ws_down", "rest_fail"):
+                    await engine.alerter.send("feed", f"金十数据源：{status}", detail, {"source": "jin10", "status": status})
+                elif status == "ws_up" and engine.feed_was_down.pop("jin10", False):
+                    await engine.alerter.send("feed", "金十数据源恢复", detail, {"source": "jin10", "status": status})
+                if status in ("ws_down", "rest_fail"):
+                    engine.feed_was_down["jin10"] = True
+            engine.add_feed(F.jin10_feed(poll_s=float(j10.get("poll_s", 10)), url=j10.get("url") or F.JIN10_FLASH_URL,
+                                         headers=j10.get("headers") or None, types=tuple(j10.get("types") or (0, 1)),
+                                         ws=bool(j10.get("ws", True)), ws_url=str(j10.get("ws_url") or F.JIN10_WS_URL), on_health=_j10_health))
 
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()

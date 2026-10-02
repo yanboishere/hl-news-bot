@@ -285,7 +285,7 @@ function tapeDetail(r) {
       <dt>id</dt><dd class="mono">${fmt.esc(r.id)}</dd>
     </dl></div>`;
 }
-const KIND_ZH = { key_news: "关键新闻", open: "开仓", close: "平仓", halt: "熔断" };
+const KIND_ZH = { key_news: "关键新闻", open: "开仓", close: "平仓", halt: "熔断", feed: "数据源" };
 function alertsPanel(rows) {
   if (!rows || !rows.length) return `<div class="empty">还没有报警。关键新闻类（模板里 alert: true）、开仓、平仓、熔断会出现在这里；Telegram / macOS 通知在 config.yaml 的 alerts 里开关。</div>`;
   return `<div class="alerts">${rows.map(a => `<div class="alert-row">

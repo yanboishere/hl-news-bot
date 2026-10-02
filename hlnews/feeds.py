@@ -378,70 +378,209 @@ def jin10_squawk(d: dict) -> str | None:
     return f"{head} ACTUAL {fmt(actual)} (FORECAST {fmt(cons)}; PREVIOUS {fmt(prev)})"
 
 
-async def jin10_feed(poll_s: float = 3.0, url: str = JIN10_FLASH_URL, headers: dict | None = None, types: tuple[int, ...] = (0, 1)) -> AsyncIterator[NewsItem]:
-    """金十数据 7x24 快讯 via the endpoint the jin10.com front end uses (undocumented; the same one akshare wraps).
-
-    Measured 2026-10-02: NFP structured items (type=1, actual/consensus/previous/star) posted 2-4 s after the BLS
-    release; the Toshiba HDD story posted 24 min after Nikkei Asia and 13 h before 华尔街见闻. 20 items per page,
-    ~0.15 s, only ~10 days of history. Reachable directly (no proxy) from China. For the sanctioned paid route
-    (open-data-api.jin10.com/data-api/flash with a secret-key header) point `url`/`headers` at it.
-    type 0 = text flash (Chinese), type 1 = data release (rendered as an English squawk line), type 2 = articles (skipped)."""
-    import urllib.request
+def _jin10_item_to_news(it: dict, types: tuple[int, ...]) -> NewsItem | None:
+    """One 金十 flash item (REST or WS shape, identical fields) -> NewsItem, or None to skip."""
     from datetime import datetime, timedelta, timezone
+
+    typ = it.get("type")
+    if typ not in types:
+        return None
+    d = it.get("data") or {}
+    iid = str(it.get("id"))
+    try:
+        ts = int(datetime.strptime(it["time"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone(timedelta(hours=8))).timestamp() * 1000)
+    except Exception:  # noqa: BLE001
+        ts = now_ms()
+    if typ == 1:
+        title = jin10_squawk(d)
+        if not title:
+            return None
+        raw = {"id": iid, "type": 1, "zh": f"{d.get('country', '')}{d.get('time_period', '')}{d.get('name', '')} {d.get('actual')}{d.get('unit', '')}",
+               "star": d.get("star"), "indicator_id": d.get("indicator_id"), "pub_time": d.get("pub_time"), "important": it.get("important")}
+    else:
+        text = re.sub(r"<[^>]+>", "", (d.get("title") or "") + " " + (d.get("content") or "")).strip()
+        if not text:
+            return None
+        title = text[:600]
+        raw = {"id": iid, "type": typ, "important": it.get("important"), "tags": it.get("tags"), "channel": it.get("channel"),
+               "source": d.get("source"), "pic": bool(d.get("pic"))}
+    return NewsItem(id="jin10_" + iid, source="jin10", channel="金十数据", title=title, url=f"https://flash.jin10.com/detail/{iid}",
+                    ts_ms=ts, recv_ms=now_ms(), account="金十数据", suggestions=[], raw=raw)
+
+
+JIN10_WS_URL = "wss://wss-flash-2.jin10.com/"
+
+
+def _jin10_xor(buf: bytes, key: str) -> bytes:
+    """金十's 'encryption': byte-wise XOR with the key string, offset by the key's first char code."""
+    k0 = ord(key[0])
+    n = len(key)
+    return bytes(b ^ ord(key[(i + k0) % n]) for i, b in enumerate(buf))
+
+
+def _jin10_login_frame(last_id: str | None = None) -> bytes:
+    """opcode 4002: user_id(int32=0 anonymous), token(str ''), browser(str), level(int32 0), platform(str 'web'), [last_id]."""
+    import struct
+
+    def wstr(x: str) -> bytes:
+        e = x.encode("utf-8")
+        return struct.pack("<H", len(e)) + e
+
+    f = struct.pack("<h", 4002) + struct.pack("<i", 0) + wstr("") + wstr("Chrome") + struct.pack("<i", 0) + wstr("web")
+    if last_id:
+        f += wstr(last_id)
+    return f
+
+
+async def jin10_feed(poll_s: float = 10.0, url: str = JIN10_FLASH_URL, headers: dict | None = None, types: tuple[int, ...] = (0, 1),
+                     ws: bool = True, ws_url: str = JIN10_WS_URL, on_health=None) -> AsyncIterator[NewsItem]:
+    """金十数据 7x24 快讯. WebSocket push (the jin10.com front end's own socket) with REST polling as a safety net.
+
+    Protocol (reverse-read from the front end, 2026-10-03): raw WebSocket; the first server frame is 4 x uint32 LE, the
+    2nd and 3rd form the XOR key f"{third}.{second}"; every later frame is XORed with that key; frame = int16 LE opcode
+    + payload. 4002 login (we send it anonymously; reply {"status":101,"message":"visitor login success."}),
+    1200 last-list (int32 n, n x [uint16 len + UTF-8 JSON], int32 isFull) used as baseline, 1000/1010/1100 one flash
+    item as JSON with `action` 1 add / 2 modify / 3 delete, 1201 heartbeat (~10 s; reply with an empty text frame),
+    1005 top list (ignored). Items have the same shape as the REST endpoint.
+
+    REST fallback: `url` every `poll_s` (default 10 s) with the same dedup set, so a WS outage degrades to a 10 s poll.
+    Measured 2026-10-02: NFP structured items 2-4 s after the BLS release via REST; WS removes the polling interval.
+    For the paid route point `url`/`headers` at open-data-api.jin10.com (secret-key) and set ws=False.
+    on_health(status: str, detail: str) is called on 'ws_up', 'ws_down', 'rest_fail' transitions for feed alerts."""
+    import struct
+    import urllib.request
 
     hdrs = dict(JIN10_HEADERS)
     if headers:
         hdrs.update(headers)
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     seen: set[str] = set()
-    first = True
-    loop = asyncio.get_running_loop()
-    cst = timezone(timedelta(hours=8))
+    queue: asyncio.Queue[NewsItem] = asyncio.Queue()
+    state = {"ws_up": False, "rest_fail": 0, "newest_time": "", "connects": 0}
 
-    def fetch() -> list[dict]:
+    async def health(status: str, detail: str) -> None:
+        if on_health:
+            try:
+                r = on_health(status, detail)
+                if asyncio.iscoroutine(r):
+                    await r
+            except Exception:  # noqa: BLE001
+                pass
+
+    def accept(it: dict, baseline: bool) -> None:
+        iid = str(it.get("id"))
+        if not iid or iid in seen:
+            return
+        seen.add(iid)
+        t = it.get("time") or ""
+        if t > state["newest_time"]:
+            state["newest_time"] = t
+        if baseline:
+            return
+        n = _jin10_item_to_news(it, types)
+        if n is not None:
+            queue.put_nowait(n)
+
+    def rest_fetch() -> list[dict]:
         with opener.open(urllib.request.Request(url, headers=hdrs), timeout=15) as r:
             d = json.loads(r.read())
         return d.get("data") or []
 
-    while True:
-        try:
-            items = await loop.run_in_executor(None, fetch)
-        except Exception as e:  # noqa: BLE001
-            log.warning("jin10 fetch failed: %s", e)
-            items = []
-        for it in sorted(items, key=lambda x: (x.get("time") or "", str(x.get("id")))):
-            iid = str(it.get("id"))
-            if iid in seen:
-                continue
-            seen.add(iid)
-            if first:
-                continue
-            typ = it.get("type")
-            if typ not in types:
-                continue
-            d = it.get("data") or {}
+    async def rest_loop() -> None:
+        loop = asyncio.get_running_loop()
+        first = True
+        while True:
             try:
-                ts = int(datetime.strptime(it["time"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=cst).timestamp() * 1000)
-            except Exception:  # noqa: BLE001
-                ts = now_ms()
-            if typ == 1:
-                title = jin10_squawk(d)
-                if not title:
-                    continue
-                raw = {"id": iid, "type": 1, "zh": f"{d.get('country', '')}{d.get('time_period', '')}{d.get('name', '')} {d.get('actual')}{d.get('unit', '')}",
-                       "star": d.get("star"), "indicator_id": d.get("indicator_id"), "pub_time": d.get("pub_time"), "important": it.get("important")}
-            else:
-                text = re.sub(r"<[^>]+>", "", (d.get("title") or "") + " " + (d.get("content") or "")).strip()
-                if not text:
-                    continue
-                title = text[:600]
-                raw = {"id": iid, "type": typ, "important": it.get("important"), "tags": it.get("tags"), "channel": it.get("channel"),
-                       "source": d.get("source"), "pic": bool(d.get("pic"))}
-            yield NewsItem(
-                id="jin10_" + iid, source="jin10", channel="金十数据", title=title, url=f"https://flash.jin10.com/detail/{iid}",
-                ts_ms=ts, recv_ms=now_ms(), account="金十数据", suggestions=[], raw=raw,
-            )
-        first = False
-        if len(seen) > 4000:
-            seen = set(list(seen)[-1500:])
-        await asyncio.sleep(poll_s)
+                items = await loop.run_in_executor(None, rest_fetch)
+                if state["rest_fail"] >= 5:
+                    await health("rest_ok", "REST polling recovered")
+                state["rest_fail"] = 0
+                for it in sorted(items, key=lambda x: (x.get("time") or "", str(x.get("id")))):
+                    accept(it, baseline=first)
+                first = False
+            except Exception as e:  # noqa: BLE001
+                state["rest_fail"] += 1
+                log.warning("jin10 REST fetch failed (%d): %s", state["rest_fail"], e)
+                if state["rest_fail"] == 5 and not state["ws_up"]:
+                    await health("rest_fail", f"REST failed 5x and WS is down: {e}")
+            await asyncio.sleep(poll_s)
+
+    async def ws_loop() -> None:
+        import websockets
+
+        backoff = 1.0
+        while True:
+            try:
+                async with websockets.connect(ws_url, origin="https://www.jin10.com", user_agent_header="Mozilla/5.0 (hl-news-bot)",
+                                              max_size=2**24, ping_interval=None, open_timeout=15) as sock:
+                    first = await asyncio.wait_for(sock.recv(), timeout=15)
+                    if isinstance(first, str) or len(first) < 12:
+                        raise RuntimeError(f"unexpected handshake: {first!r}"[:120])
+                    _, i2, i3 = struct.unpack_from("<III", first, 0)
+                    key = f"{i3}.{i2}"
+                    await sock.send(_jin10_xor(_jin10_login_frame(), key))
+                    backoff = 1.0
+                    state["connects"] += 1
+                    got_baseline = False
+                    while True:
+                        raw = await asyncio.wait_for(sock.recv(), timeout=60)  # heartbeats come every ~10 s
+                        if isinstance(raw, str):
+                            continue
+                        dec = _jin10_xor(raw, key)
+                        op = struct.unpack_from("<h", dec, 0)[0]
+                        pos = 2
+                        if op == 1201:
+                            await sock.send("")
+                            continue
+
+                        def rstr() -> str:
+                            nonlocal pos
+                            n = struct.unpack_from("<H", dec, pos)[0]
+                            pos += 2
+                            v = dec[pos:pos + n].decode("utf-8", "replace")
+                            pos += n
+                            return v
+
+                        if op == 4002:
+                            reply = rstr()
+                            if not state["ws_up"]:
+                                state["ws_up"] = True
+                                log.info("jin10 ws connected: %s", reply[:80])
+                                await health("ws_up", reply[:80])
+                            continue
+                        if op == 1200:
+                            cnt = struct.unpack_from("<i", dec, pos)[0]
+                            pos += 4
+                            items = [json.loads(rstr()) for _ in range(cnt)]
+                            # The list after the first connect is history: baseline only. After a reconnect, items newer
+                            # than anything seen so far were missed during the outage and are yielded.
+                            cutoff = state["newest_time"] if (got_baseline or state["connects"] > 1) else "9999"
+                            for it in sorted(items, key=lambda x: (x.get("time") or "", str(x.get("id")))):
+                                accept(it, baseline=(it.get("time") or "") <= cutoff)
+                            got_baseline = True
+                            continue
+                        if op in (1000, 1010, 1100):
+                            it = json.loads(rstr())
+                            if it.get("action") in (1, None):      # 1 add; 2 modify / 3 delete / 6 reload are not new information
+                                accept(it, baseline=False)
+                            continue
+                        # 1001 events, 1003 opinion, 1005 top list, 1006 voice: ignore
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                if state["ws_up"]:
+                    state["ws_up"] = False
+                    await health("ws_down", str(e)[:120])
+                log.warning("jin10 ws error: %s; reconnect in %.0fs", str(e)[:120], backoff)
+                await asyncio.sleep(backoff + random.random())
+                backoff = min(backoff * 2, 60.0)
+
+    tasks = [asyncio.create_task(rest_loop())]
+    if ws:
+        tasks.append(asyncio.create_task(ws_loop()))
+    try:
+        while True:
+            yield await queue.get()
+    finally:
+        for t in tasks:
+            t.cancel()

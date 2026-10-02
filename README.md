@@ -1396,7 +1396,7 @@ ALERT [key_news] supply_expansion short xyz:WDC | Toshiba to double hard disk dr
 
 | 路径 | 地址 | 鉴权 | 状态 |
 |---|---|---|---|
-| 网页用的快讯接口 | `https://flash-api.jin10.com/get_flash_list?channel=-8200&vip=1[&max_time=…]` | 请求头 `x-app-id: bVBF4FyRTn5NJF5n`、`x-version: 1.0.0`（前端公开值） | 可用。20 条/页，约 0.15 秒；`max_time` 翻页；只保留约 10 天；连发 12 次无限流。未文档化，akshare 的 `js_news` 用的就是它，字段可能变 |
+| 网页用的快讯接口（**采用**） | REST `https://flash-api.jin10.com/get_flash_list?channel=-8200&vip=1[&max_time=…]` + WebSocket `wss://wss-flash-2.jin10.com/` | REST 请求头 `x-app-id: bVBF4FyRTn5NJF5n`、`x-version: 1.0.0`（前端公开值）；WS 匿名登录 | 可用。REST 20 条/页约 0.15 秒、`max_time` 翻页、只保留约 10 天、连发 12 次无限流；WS 推送延迟 0.0–0.3 秒（实测）。未文档化，akshare 的 `js_news` 用的是同一 REST，字段可能变 |
 | 金十开放平台（商用） | `https://open-data-api.jin10.com/data-api/{flash,v2/flash,calendar/data,calendar/event,news,symbols,quotes}` | 请求头 `secret-key`，登录 open.jin10.com 后在"订单/套餐"页购买，有 Python/Go/Java/Node/C++ demo | 价格登录后可见，未公开 |
 | 金十智能开放平台（MCP） | `https://mcp.jin10.com/mcp`，Bearer token（登录金十账号→激活→复制） | 工具 `list_flash`、`search_flash`、`list_news`、`get_quote`、`get_kline` | 面向 AI 应用；轮询不如 REST 顺手 |
 
@@ -1408,7 +1408,9 @@ ALERT [key_news] supply_expansion short xyz:WDC | Toshiba to double hard disk dr
 
 ### 接法
 
-`jin10_feed`（`hlnews/feeds.py`）每 3 秒拉一页，按 id 去重。`type=0` 文字快讯去掉 `<b>` 后原样进管线（中文，行业供给规则能读）。`type=1` 数据条目用 `jin10_squawk` 拼成现有宏观规则认得的英文 squawk 行：
+`jin10_feed`（`hlnews/feeds.py`）WebSocket 推送优先，REST 每 10 秒兜底，两路共用一个 id 去重集合；WS 断线时自然退化为 10 秒轮询，恢复后自动接管，并通过 `feed` 类报警通知"数据源 ws_down / 恢复"。
+
+WS 协议是从前端 JS 读出来的：裸 WebSocket；服务端第一帧是 4 个 uint32 LE，第二、第三个拼成异或密钥 `"{third}.{second}"`；之后每一帧按字节与密钥循环异或（偏移为密钥首字符的码值）；帧 = int16 LE 操作码 + 载荷。客户端连上后发 4002 登录帧（user_id 0、空 token、浏览器名、等级 0、"web"），服务端回 `{"status":101,"message":"visitor login success."}`；1200 是最近 40 条列表（int32 条数 + 每条 uint16 长度前缀的 UTF-8 JSON + int32 是否全量），只用作基线，重连后比已见最新时间更新的条目才算漏掉的新闻；1000/1010/1100 是单条快讯 JSON，`action` 1 新增 / 2 修改 / 3 删除，只取新增；1201 心跳约 10 秒一次，回一个空文本帧；1005 置顶列表忽略。条目字段与 REST 完全一致。`type=0` 文字快讯去掉 `<b>` 后原样进管线（中文，行业供给规则能读）。`type=1` 数据条目用 `jin10_squawk` 拼成现有宏观规则认得的英文 squawk 行：
 
 ```
 US Nonfarm Payroll Employment (9月) ACTUAL 29K (FORECAST 90K; PREVIOUS 162K)   ← 万人 ×10 → K
@@ -1423,11 +1425,16 @@ feeds:
   max_age_by_source: {jin10: 900}
 ```
 
-"金十数据"已加入 `strong_publishers`。若买了开放平台，把 `feeds.jin10.url` 指到 `open-data-api.jin10.com/data-api/flash`、`headers` 填 `secret-key` 即可，解析逻辑不变。
+```yaml
+feeds:
+  jin10: {enabled: true, ws: true, ws_url: wss://wss-flash-2.jin10.com/, poll_s: 10, types: [0, 1]}
+```
+
+"金十数据"已加入 `strong_publishers`。若买了开放平台，把 `feeds.jin10.url` 指到 `open-data-api.jin10.com/data-api/flash`、`headers` 填 `secret-key`、`ws: false` 即可，解析逻辑不变。
 
 ### 注意
 
-每天约 880 条快讯都会过一遍规则（<1 ms/条）并落库；若同时开 LLM 慢车道，规则判噪音的中文快讯会全部送去 LLM，Haiku 约 $0.3–0.5/天，可在 `classifier.llm` 里按需关掉或将来加按源过滤。金十的 `type=1` 条目时间是它自己的入库时间，比源晚 2–4 秒，加上 3 秒轮询，宏观数据端到端约 3–7 秒；要更快就在 `macro.py` 的发布窗口内把 `poll_s` 临时压到 0.5 秒（未实现）。免费接口随时可能改字段，`jin10_squawk` 对缺字段返回 `None` 并跳过，不会让进程挂掉。
+每天约 880 条快讯都会过一遍规则（<1 ms/条）并落库；若同时开 LLM 慢车道，规则判噪音的中文快讯会全部送去 LLM，Haiku 约 $0.3–0.5/天，可在 `classifier.llm` 里按需关掉或将来加按源过滤。金十的 `type=1` 条目时间是它自己的入库时间，比源晚 2–4 秒；WS 推送把轮询间隔去掉了，宏观数据端到端约 2–5 秒。全源联跑实测（2026-10-03）：三条金十快讯的发布时间到本机接收分别为 0.0、0.2、0.3 秒。免费接口随时可能改字段或协议：REST 变了 `jin10_squawk` 对缺字段返回 `None` 跳过；WS 握手或帧格式变了会走重连退避并由 REST 兜底，进程不会挂。
 
 ---
 

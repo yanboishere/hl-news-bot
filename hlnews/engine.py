@@ -97,6 +97,7 @@ class Engine:
         self.require_two = set(rules_cfg.get("require_two_sources_for", []))
         self.corr = Corroboration(float(rules_cfg.get("corroboration_window_s", 90)), rules_cfg.get("corroboration_window_by_class") or {})
         self.alerter = Alerter(cfg, store)
+        self.feed_was_down: dict[str, bool] = {}
         self._alert_recent: dict[tuple[str, str, str], int] = {}
         self.alert_dedup_ms = int(float((cfg.get("alerts") or {}).get("dedup_s", 21600)) * 1000)
         self.dedup = Dedup()
@@ -117,6 +118,10 @@ class Engine:
         self.mw_weekday = int(mw.get("weekday_utc", 4))          # 4 = Friday
         self.mw_start = str(mw.get("start_utc", "07:55"))
         self.mw_end = str(mw.get("end_utc", "09:35"))
+
+    def add_feed(self, feed: AsyncIterator[NewsItem]) -> None:
+        """Register a feed after construction (used when a feed needs a reference to the engine, e.g. for health alerts)."""
+        self.feeds.append(feed)
 
     def in_maintenance_window(self, t: float | None = None) -> bool:
         """Hyperliquid weekly upgrades (Fri 08:00-09:30 UTC in Aug-Sep 2026) run a post-only window: IOC does not fill
