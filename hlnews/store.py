@@ -43,6 +43,12 @@ CREATE INDEX IF NOT EXISTS idx_pos_entry ON positions(entry_ms);
 """
 
 
+# exit_reason of positions that a killed process (SIGKILL, workspace stop) left open; their records are closed on the
+# next start without an exit price or P&L and are left out of every statistic (CLOSED_SQL).
+ABANDONED = "restart_abandoned"
+CLOSED_SQL = f"exit_ms IS NOT NULL AND COALESCE(exit_reason, '') != '{ABANDONED}'"
+
+
 class Store:
     def __init__(self, path: str):
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -108,9 +114,19 @@ class Store:
             out.append(d)
         return out
 
+    def mark_abandoned(self, ids: list[str], ts_ms: int) -> None:
+        """Close the records of positions a killed process never closed. No exit price, no P&L, not in the stats."""
+        for pid in ids:
+            self._exec("UPDATE positions SET exit_ms=?, exit_reason=? WHERE id=? AND exit_ms IS NULL", (ts_ms, ABANDONED, pid))
+
     # ------------------------------------------------------------------ reads
+    def open_position_rows(self) -> list[dict[str, Any]]:
+        cur = self.conn.execute("SELECT * FROM positions WHERE exit_ms IS NULL ORDER BY entry_ms")
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
     def closed_positions(self) -> list[dict[str, Any]]:
-        cur = self.conn.execute("SELECT * FROM positions WHERE exit_ms IS NOT NULL ORDER BY exit_ms")
+        cur = self.conn.execute(f"SELECT * FROM positions WHERE {CLOSED_SQL} ORDER BY exit_ms")
         cols = [c[0] for c in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 

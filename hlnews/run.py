@@ -6,6 +6,9 @@
 
 News needs a NewsLiquid token: export OPENNEWS_TOKEN (https://6551.io/mcp). Live trading additionally needs
 mode: live in config.yaml and HL_AGENT_KEY / HL_ACCOUNT in the environment. Never put the master key here.
+
+Only one bot runs per data directory (hlnews/instance.py); a second start exits with code 3. On a Memoh cloud
+computer, start and keep it alive with ops/memoh/hlbot instead of running this directly.
 """
 from __future__ import annotations
 
@@ -20,6 +23,7 @@ import sys
 import yaml
 
 from . import feeds as F
+from . import instance
 from .engine import Engine
 from .hl import HLClient
 from .newsliquid import newsliquid_feed
@@ -115,8 +119,14 @@ def main() -> None:
     ap.add_argument("--summary", action="store_true")
     args = ap.parse_args()
     cfg = load_cfg(args.config)
+    # one bot per data directory: a second start (console button, supervisor, shell) exits with code 3
+    instance_lock = None if args.summary else instance.acquire(os.path.dirname(cfg["storage"]["sqlite_path"]) or ".")
     setup_logging(cfg["storage"]["log_path"])
-    asyncio.run(main_async(cfg, args))
+    try:
+        asyncio.run(main_async(cfg, args))
+    finally:
+        if instance_lock is not None:
+            instance_lock.close()
 
 
 if __name__ == "__main__":

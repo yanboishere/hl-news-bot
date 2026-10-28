@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# hlbot: control hl-news-bot on a Memoh cloud computer (start / stop / status / ensure / logs / doctor / ...).
+# Thin wrapper: finds the repo from this script's location (symlinks followed) and runs ops/memoh/ctl.py with the
+# repo's .venv python. `hlbot --help` lists the commands; README section 16 explains the keep-alive design.
+set -euo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+here="$(cd -P "$(dirname "$src")" && pwd)"
+code="$(cd "$here/../.." && pwd)"
+root="${HLBOT_ROOT:-$code}"
+
+py="$root/.venv/bin/python"
+[ -x "$py" ] || py="$code/.venv/bin/python"
+[ -x "$py" ] || py="$(command -v python3 || true)"
+if [ -z "$py" ]; then
+  echo "hlbot: python3 not found (run ops/memoh/install.sh first)" >&2
+  exit 1
+fi
+exec "$py" "$here/ctl.py" "$@"

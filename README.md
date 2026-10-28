@@ -35,6 +35,7 @@
 13. [常见问题](#13-常见问题)
 14. [可视化控制台与 macOS 客户端](#14-可视化控制台与-macos-客户端)
 15. [NewsLiquid：接入、套餐与额度、迁移说明](#15-newsliquid接入套餐与额度迁移说明)
+16. [在 Memoh 云电脑上部署与保活](#16-在-memoh-云电脑上部署与保活)
 
 **第二部分：架构设计与可行性结论**
 
@@ -1389,6 +1390,8 @@ NewsLiquid 是 6551 团队的新闻交易终端，数据接口叫 OpenNews（`ht
 | Pro | 29U | 20 万条 | `transport: rest`、`poll_s: 15`（默认，约 17.3 万次 / 30 天） |
 | Max | 99U / 月 | 新闻 + 推特实时 WebSocket | `transport: auto` 或 `ws` |
 
+在 Memoh 云电脑上可以用 `hlbot plan free|plus|pro|max` 一键写入这些设置（第 16 节，其中 pro 预设用 20 秒，更保守）。
+
 **额度单位没有公开文档讲清楚。** README 写"每次 REST/MCP 调用消耗 1 个额度"；MCP 页面把额度显示成积分（免费每天 5 积分 ≈ 100 条，1 USDT = 500 积分）；推文也没说 Plus / Pro 是一次性还是按月。上表按"1 次调用 = 1 条"估算。拿到 token 后先跑 10 分钟，到 MCP 页面的调用日志和计费规则核对每次 `news_search` 实际扣多少，再调 `poll_s` 或选套餐。
 
 除了按 `poll_s` 的固定轮询，REST 还有几处额外消耗：突发时多读的分页；等第二来源时的热窗口（5 秒一轮，最长 2 分钟）；宏观发布前后的热窗口（5 秒一轮，5 分钟）；WS 每次（重新）订阅后的一次补漏；WS 在线时每 5 分钟一次抽查（每天 288 次）。额度用完或被限流时，REST 暂停 10 分钟并推一条 `feed` 报警。
@@ -1418,6 +1421,175 @@ NewsLiquid 是 6551 团队的新闻交易终端，数据接口叫 OpenNews（`ht
 - 无 token / 无效 token：REST 401（`missing Authorization header` / `invalid token`），WS 握手 401 `unauthorized`；`auto` 模式依次报 `ws_refused`、`auth_fail`。
 - `data/replay.jsonl` 用真实主网价格跑完整管线，结果见第 2 节。
 - 有了 token 以后建议第一件事：跑 10 分钟，`select count(*), round(avg(age_s),1) from news where source='newsliquid'` 看条目量和延迟；到 MCP 页面看额度消耗。
+
+## 16. 在 Memoh 云电脑上部署与保活
+
+`ops/memoh/` 是把整套系统交给 Memoh agent，在它的云电脑（工作区）上常驻运行的工具：
+
+- **安装**：一条命令装好，装完自动启动。
+- **保活**：守护进程 supervisor 负责进程挂掉、卡死后重启，Memoh hooks 和一个每小时的定时任务负责工作区重启以后把它拉起来。
+- **日常操作**：交给 agent，它通过一个技能文件学会怎么查状态、看日志、重启。
+- **交易模式**：默认 paper，不碰钱。
+
+### 16.1 拿到 token 之后：一次性安装
+
+**1. 让 agent 跑安装命令。** 把下面这段发给你的 Memoh agent，也可以自己在工作区的 Terminal 标签页里执行。`--plan` 填你买的 NewsLiquid 套餐（free / plus / pro / max）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yanboishere/hl-news-bot/main/ops/memoh/install.sh | bash -s -- --plan pro
+```
+
+安装脚本可以重复运行（再跑一次就是更新），大约一两分钟。它依次做这些事：
+
+1. 把仓库克隆到 `/data/hl-news-bot`（`/data` 在工作区重启后不会丢），在仓库里建 `.venv`，装依赖。
+2. 从 `.env.example` 生成 `.env`（权限 600，占位符清空）。
+3. 按 `--plan` 改 `config.yaml` 里 NewsLiquid 的轮询设置。
+4. 在 `/data/.memoh/hooks.json` 里加三个 hook。原有的 hook 不动，修改前会备份成 `hooks.json.bak-hlbot`。
+5. 把 agent 技能装到 `/data/skills/user/personal/hl-news-bot-ops/`。
+6. 用主网实时价格跑一遍回放自检（第 2 节那份 NewsLiquid 样本）。
+7. 查一下云电脑出口 IP 在哪个国家。Hyperliquid 条款限制美国、安大略和受制裁地区的用户。
+8. 启动守护进程，由它拉起 bot 和控制台。
+
+不想要控制台就加 `--no-ui`。
+
+**2. 填 token。** 在 Memoh 的 **Files** 标签页打开 `/data/hl-news-bot/.env`，把 `OPENNEWS_TOKEN=` 这一行补上，然后保存。守护进程几秒内会发现 `.env` 变了，自动重启 bot；有持仓时等平仓后再重启。不要把 token 发在聊天里，聊天记录会留在 Memoh 上。也可以在安装前，在 Terminal 标签页里先 `export OPENNEWS_TOKEN=...` 再跑安装命令。
+
+**3. 验证。** 让 agent 运行 `hlbot doctor --net`，它会用你的 token 调一次 NewsLiquid（扣 1 次额度），顺便测一下到 Hyperliquid 的延迟。然后到 NewsLiquid 控制台的调用记录里看这一次实际扣了多少：额度是按调用次数还是按条数算，官方没写清楚（第 15 节）。
+
+**4. 让 agent 建定时任务（必须做）。** 把下面这段发给 agent：
+
+> 用 schedule 工具建一个定时任务：名字“hl-news-bot 保活”，cron `17 * * * *`（每小时第 17 分钟），命令是“运行 `bash /data/hl-news-bot/ops/memoh/hlbot ensure --quiet`，按 hl-news-bot-ops 技能里‘定时检查’的规则处理，正常就只回复‘正常’”。
+
+为什么必须做见 16.2。每次运行都是一次 agent 对话，会消耗 Memoh 额度。觉得贵可以改成每两小时一次，代价是工作区重启后最长要等两小时才恢复。
+
+**5. Telegram 告警（可选）。** 在 `.env` 里填 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID`，保存后自动生效。之后 bot 的交易告警，以及守护进程的重启、卡死、崩溃循环通知，都会推到你手机。
+
+### 16.2 保活的几层
+
+```mermaid
+flowchart TD
+  SCHED["Memoh 定时任务<br/>每小时一次"] -->|每次都开新会话| SS["SessionStart hook"]
+  CHAT["你在 Memoh 里开的新对话"] --> SS
+  CREATE["Memoh 创建 / 重建工作区"] --> WSS["WorkspaceStart hook"]
+  SS -->|hlbot ensure --hook| ENS{"守护进程在跑吗？"}
+  WSS -->|hlbot ensure --hook| ENS
+  ENS -->|在跑：什么都不做| SUP
+  ENS -->|没在跑：拉起| SUP["supervisor.py 守护进程<br/>独立会话<br/>hook 结束后也不退出"]
+  SUP -->|退出就重启<br/>崩溃循环时退避| BOT["hlnews.run<br/>bot（默认 paper）"]
+  SUP -->|看着| UI["hlnews.ui 控制台<br/>127.0.0.1:8765"]
+  BOT -->|每 2 秒| HB[("data/state.json 心跳")]
+  HB -->|90 秒没更新 = 卡死<br/>强制重启| SUP
+  ENV[(".env")] -->|改动后，空仓时重启 bot| SUP
+  STOPM["Memoh 停止工作区"] --> WST["WorkspaceStop hook"]
+  WST -->|hlbot stop --hook<br/>先平仓再退出| SUP
+  classDef ext fill:#eeeeee,stroke:#888888,color:#222222
+  classDef file fill:#e8f5e9,stroke:#4caf50,color:#1b5e20
+  class SCHED,CHAT,CREATE,STOPM ext
+  class HB,ENV file
+```
+
+| 层 | 什么时候起作用 | 管什么 |
+|---|---|---|
+| 守护进程 `ops/memoh/supervisor.py` | 一直在跑，每 5 秒检查一次 | 重启后台进程，具体见下面 |
+| 实例锁 `data/hlnews.lock` | 每次启动 bot | 同一个数据目录只能跑一个 bot，第二个直接以退出码 3 退出。守护进程托管期间，控制台的启动和回放按钮会停用 |
+| SessionStart hook | 每个新会话：你开的新对话，以及每次定时任务运行 | `hlbot ensure --hook`：守护进程不在就拉起来，1 秒左右返回 |
+| WorkspaceStart hook | Memoh 创建或重建工作区时 | 同上 |
+| WorkspaceStop hook | Memoh 自己停止工作区时 | `hlbot stop --hook`：先平仓再退出，但不记为手动停止，下次会自动拉起 |
+| 每小时的定时任务 | 每小时一次 | 开新会话会触发 SessionStart hook 把 bot 拉起来，agent 再确认一遍、有问题时通知你 |
+
+守护进程具体负责这些：
+
+- **退出**：bot 退出就重启。短时间里反复崩溃时退避，间隔从 5 秒逐步加到最长 5 分钟。
+- **卡死**：心跳文件 `data/state.json` 超过 90 秒没更新，判定卡死并强制重启。刚启动、还没写过心跳的 bot 有 120 秒宽限。
+- **`.env` 改动**：空仓时自动重启 bot 和控制台，让新的值生效。
+- **控制台**：控制台挂了就重启它。
+- **日志**：轮转 `bot.out`、`hlnews.log`、`ui.out`。
+- **告警**：配置了 Telegram 时，推送重启、卡死、崩溃循环和停止通知。
+
+**为什么定时任务是必须的。** 下面这几点是看 Memoh 源码（v1.0.0-beta.1，`internal/workspace`）确认的，和文档的说法不完全一样：
+
+- Workspace 标签页里的 **Start / Stop 按钮**，以及服务器重启后的自动恢复，都**不会**触发 WorkspaceStart / WorkspaceStop hook。工作区重启后，后台进程全部没了，要等到下一个新会话的 SessionStart hook 才会被拉起来：要么是下一次定时任务，要么是你开一个新对话。
+- 定时任务默认每次都开新会话，所以每次运行都会触发 SessionStart hook。定时任务的频率就是“工作区重启后最长多久恢复”。
+- 点 Stop 按钮会直接杀掉进程，bot 来不及平仓。**停工作区之前先运行 `hlbot stop`。** 如果忘了，下次启动时：
+  - 模拟盘上没平的那几笔，记录会被关成 `restart_abandoned`（没有盈亏，不计入统计），同时推一条告警；
+  - 实盘只告警，请到交易所核对（见 16.4）。
+- Memoh 执行命令时（hook 和 agent 的 exec 都一样）：每条命令在自己的进程组里跑，超时会把整个进程组杀掉，而且要等命令的输出管道关闭才算结束。`hlbot` 启动守护进程时让它进入独立会话，输出写到文件、不占用管道，所以 hook 结束后守护进程照样在跑。这一点在本地按 bridgesvc 的执行逻辑模拟验证过，没有在真的 Memoh 上验证（16.6）。
+
+### 16.3 日常命令
+
+`bash /data/hl-news-bot/ops/memoh/hlbot <命令>`。安装时如果能写 `/usr/local/bin`，会顺手建一个 `hlbot` 命令。下表都简写成 `hlbot`。
+
+| 命令 | 做什么 |
+|---|---|
+| `hlbot status` | 一屏看完：守护进程、bot 心跳、权益、持仓、最近一条新闻、控制台、token 有没有填、hooks；`--json` 输出机器可读的 |
+| `hlbot ensure --quiet` | 一行健康状态，不在运行就拉起；第一个词是 OK / STOPPED / RESTARTED / DEGRADED / FAILED |
+| `hlbot logs [bot\|app\|sup\|ui] -n 60` | 看日志；`-f` 持续跟踪（在 Terminal 标签页用） |
+| `hlbot doctor [--net]` | 检查 Python、依赖、`.env`、hooks、技能、磁盘、最近的错误；`--net` 再测 NewsLiquid（扣 1 次额度）、Hyperliquid 和出口 IP |
+| `hlbot start` / `stop` / `restart` | 启动、停止、重启。`stop` 是“停下并保持停止”：hooks 和定时任务都不会再拉起，`start` 才恢复。`stop` 和 `restart` 都会让 bot 先平掉持仓 |
+| `hlbot plan [free\|plus\|pro\|max] [--poll-s N]` | 不带参数时显示当前轮询和估算的调用量；带套餐名时改 `config.yaml`（保留注释），之后 `hlbot restart` 生效 |
+| `hlbot update [--branch B]` | 拉新代码：本地改过的文件（比如 `config.yaml`）会保留，冲突时以你的版本为准；装依赖；新版本导入失败就回滚；空仓时自动重启，有持仓时不重启 |
+| `hlbot hooks [--remove]` / `hlbot skill [--remove]` | 重装或移除 hooks、agent 技能 |
+
+`hlbot plan` 的预设：
+
+| 套餐 | 设置 |
+|---|---|
+| free | REST，每 15 分钟一次（只够验证链路） |
+| plus | REST，每 3 分钟一次 |
+| pro | REST，每 20 秒一次（约 13 万次 / 30 天） |
+| max | auto：WebSocket 实时推送，REST 只做补漏和抽查 |
+
+pro 用 20 秒，比第 15 节表里的 15 秒保守。15 秒大约要 17–19 万次 / 30 天，离 20 万的额度太近；想要 15 秒就用 `hlbot plan pro --poll-s 15`。
+
+### 16.4 实盘
+
+和第 9 节一样，要两把钥匙都打开才会实盘：`config.yaml` 里 `mode: live`，并且用 `hlbot restart --live` 启动。另外 `.env` 里要有 `HL_AGENT_KEY` 和 `HL_ACCOUNT`，缺了 `hlbot` 会拒绝启动。只开其中一把，bot 仍然按 paper 运行，`hlbot` 会提示你。
+
+agent 技能里写明了：用户在当前对话里明确要求、并且确认过风险之前，agent 不得切实盘。
+
+守护进程模式下实盘要注意三件事：
+
+- 每次正常重启（`restart`、`update`、`.env` 改动）都会先市价平掉全部持仓。所以 `update` 和 `.env` 改动在有持仓时不会自动重启。
+- 被强制杀掉之后（Stop 按钮、卡死被 SIGKILL），新进程不会接管交易所上的旧持仓，只会告警。交易所侧的止损单仍然有效，但止盈和时间止损没人管了，需要你手动处理。
+- 守护进程推送的重启通知里会附带这条提醒。
+
+### 16.5 文件与排查
+
+`data/` 下的文件都在 `.gitignore` 里：
+
+| 文件 | 内容 |
+|---|---|
+| `supervisor.log` | 守护进程做过的每件事（启动、重启原因、卡死、`.env` 改动） |
+| `bot.out` | bot 的标准输出，包括崩溃堆栈 |
+| `hlnews.log` | bot 日志 |
+| `ui.out` | 控制台输出 |
+| `supervisor.json` | 守护进程当前状态，`hlbot status` 读的就是它 |
+| `supervisor.opts.json` | 启动方式（paper / live、控制台）和套餐 |
+| `supervisor.disabled` | 手动停止标记 |
+| `hlnews.lock` / `supervisor.lock` | 单实例锁 |
+| `backup/` | `hlbot update` 前备份的本地修改 |
+
+| 现象 | 原因与处理 |
+|---|---|
+| `status` 显示 DOWN | 工作区刚重启过。等下一次定时任务，或者开个新对话，或者直接 `hlbot ensure` |
+| `STOPPED` | 之前运行过 `hlbot stop`，用 `hlbot start` 恢复 |
+| `DEGRADED`，`bot 未运行（exit code …）` | 崩溃循环。`hlbot logs bot -n 80` 看堆栈；常见原因是依赖坏了（`hlbot doctor`）或者 `config.yaml` 改错了 |
+| 新闻一直“还没有” | token 没填或者无效（`hlbot doctor --net`），或者额度用完了（看 `hlnews.log` 里的 quota 报错） |
+| 控制台打不开 | 它只监听 127.0.0.1，要在 **Desktop** 标签页里的浏览器打开 http://127.0.0.1:8765 |
+
+### 16.6 验证过什么
+
+在 Linux 虚拟机里（不是真的 Memoh 工作区）验证过以下这些：
+
+- **测试**：63 个离线测试通过，其中 26 个是这次新加的：实例锁、守护进程的各种故障、`hlbot` 各命令、hooks 合并、`update` 保留本地修改和回滚、强制结束后的持仓收尾。
+- **完整安装**：从仓库克隆真实安装，回放自检在主网价格下通过。
+- **杀 bot**：`kill -9` bot，7 秒后重新拉起。
+- **杀守护进程**：`kill -9` 守护进程，bot 还在跑；`hlbot ensure` 拉起的新守护进程接管了这个 bot，也复用了遗留的控制台，没有再起第二个。
+- **冻结 bot**：`SIGSTOP` 冻住 bot，心跳 91 秒没更新时判定卡死并重启。
+- **换 token**：改 `.env` 里的 token，10 秒内自动重启；用假 token 时，真实接口返回 401，bot 发出了 feed 告警。
+- **hooks**：按 Memoh bridgesvc 的执行逻辑写了模拟器，三个 hook 命令都在 1–2 秒内返回，守护进程在 hook 结束后继续运行。WorkspaceStop 先平仓再退出，不留手动停止标记。
+
+没有验证的有两点：真实 Memoh 上 hook 的触发时机，以及每次定时任务消耗多少额度。装好以后，过一小时让 agent 跑一次 `hlbot status`：如果守护进程的“已运行”时间一直在涨，说明保活在工作。
 
 ---
 
