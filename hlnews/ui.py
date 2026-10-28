@@ -27,8 +27,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import yaml
 
+from hlnews import instance
+from hlnews.store import ABANDONED, CLOSED_SQL
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "ui_static")
+
+
+def supervisor_info(data_dir: str) -> dict:
+    """ops/memoh/supervisor.py holds <data>/supervisor.lock while it keeps the bot alive (Memoh cloud computer)."""
+    if instance.is_locked(data_dir, instance.SUPERVISOR_LOCK):
+        return {"alive": True, "pid": instance.holder_pid(data_dir, instance.SUPERVISOR_LOCK)}
+    return {"alive": False, "pid": None}
+
+
+SUPERVISED_MSG = "bot 由 supervisor 托管（ops/memoh/hlbot）：请用 hlbot start / stop / restart，或让 Memoh agent 操作"
 
 
 # --------------------------------------------------------------------------- process management
@@ -49,11 +62,18 @@ class BotProcess:
     def running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
+    def data_dir(self) -> str:
+        return os.path.join(self.repo, "data")
+
     def start(self, extra_args: list[str] | None = None) -> dict:
         with self.lock:
             if self.running():
                 return {"ok": False, "error": "bot already running", "pid": self.proc.pid}
-            os.makedirs(os.path.join(self.repo, "data"), exist_ok=True)
+            if supervisor_info(self.data_dir())["alive"]:
+                return {"ok": False, "error": SUPERVISED_MSG}
+            if instance.is_locked(self.data_dir()):
+                return {"ok": False, "error": f"已有一个 bot 在运行（pid {instance.holder_pid(self.data_dir()) or '?'}），不会再启动第二个"}
+            os.makedirs(self.data_dir(), exist_ok=True)
             out = open(os.path.join(self.repo, "data", "bot.out"), "ab")
             cmd = [self.python, "-m", "hlnews.run", *(extra_args or [])]
             self.proc = subprocess.Popen(cmd, cwd=self.repo, stdout=out, stderr=subprocess.STDOUT, env=os.environ.copy(),
@@ -65,6 +85,8 @@ class BotProcess:
         with self.lock:
             if not self.running():
                 self.proc = None
+                if supervisor_info(self.data_dir())["alive"]:
+                    return {"ok": False, "error": SUPERVISED_MSG}
                 return {"ok": True, "note": "not running"}
             p = self.proc
             try:
@@ -95,6 +117,8 @@ class BotProcess:
                         "started_ms": self.oneshot_started_ms} if self.oneshot_kind else None,
             "env": {"HL_AGENT_KEY": bool(os.environ.get("HL_AGENT_KEY")), "HL_ACCOUNT": bool(os.environ.get("HL_ACCOUNT")),
                     "OPENNEWS_TOKEN": bool(os.environ.get("OPENNEWS_TOKEN"))},
+            "supervisor": supervisor_info(self.data_dir()),
+            "instance_locked": instance.is_locked(self.data_dir()),
             "python": self.python, "repo": self.repo,
         }
 
@@ -104,6 +128,8 @@ class BotProcess:
                 return {"ok": False, "error": f"{self.oneshot_kind} still running"}
             if kind == "replay" and self.running():
                 return {"ok": False, "error": "stop the bot before replaying (both would write the same database)"}
+            if kind == "replay" and (supervisor_info(self.data_dir())["alive"] or instance.is_locked(self.data_dir())):
+                return {"ok": False, "error": "bot 正在运行（回放和 bot 写同一个数据库），先用 hlbot stop 停掉再回放"}
             self.oneshot_kind = kind
             self.oneshot_out = ""
             self.oneshot_started_ms = int(time.time() * 1000)
@@ -188,22 +214,22 @@ class Data:
                 "directional": q("select count(distinct news_id) from classifications where created_ms>=? and direction!='none'", day0),
                 "signals": q("select count(*) from signals where created_ms>=?", day0),
                 "accepted": q("select count(*) from decisions where created_ms>=? and accepted=1", day0),
-                "closed": q("select count(*) from positions where exit_ms>=?", day0),
-                "pnl": q("select coalesce(sum(pnl_usd),0) from positions where exit_ms>=?", day0),
+                "closed": q(f"select count(*) from positions where exit_ms>=? and {CLOSED_SQL}", day0),
+                "pnl": q(f"select coalesce(sum(pnl_usd),0) from positions where exit_ms>=? and {CLOSED_SQL}", day0),
             },
             "all": {
                 "news": q("select count(*) from news"), "signals": q("select count(*) from signals"),
-                "closed": q("select count(*) from positions where exit_ms is not null"),
-                "wins": q("select count(*) from positions where exit_ms is not null and pnl_usd>0"),
-                "pnl": q("select coalesce(sum(pnl_usd),0) from positions where exit_ms is not null"),
-                "fees": q("select coalesce(sum(fee_usd),0) from positions where exit_ms is not null"),
+                "closed": q(f"select count(*) from positions where {CLOSED_SQL}"),
+                "wins": q(f"select count(*) from positions where {CLOSED_SQL} and pnl_usd>0"),
+                "pnl": q(f"select coalesce(sum(pnl_usd),0) from positions where {CLOSED_SQL}"),
+                "fees": q(f"select coalesce(sum(fee_usd),0) from positions where {CLOSED_SQL}"),
             },
             "rejections": [dict(r) for r in c.execute(
                 "select reason, count(*) n from decisions where accepted=0 group by reason order by n desc limit 12")],
             "by_class": [dict(r) for r in c.execute(
                 "select event_class, count(*) n, sum(case when pnl_usd>0 then 1 else 0 end) wins, round(sum(pnl_usd),2) pnl, "
                 "sum(case when exit_reason='stop' then 1 else 0 end) stops, sum(case when exit_reason='take_profit' then 1 else 0 end) tps, "
-                "sum(case when exit_reason='time_stop' then 1 else 0 end) times from positions where exit_ms is not null group by 1 order by n desc")],
+                f"sum(case when exit_reason='time_stop' then 1 else 0 end) times from positions where {CLOSED_SQL} group by 1 order by n desc")],
             "sources": [dict(r) for r in c.execute(
                 "select channel, count(*) n, round(avg(age_s),2) avg_age, round(max(age_s),1) max_age from news where recv_ms>=? group by 1 order by n desc",
                 (int(time.time() * 1000) - 86_400_000,))],
@@ -285,6 +311,8 @@ class Data:
         for s in r["signals"]:
             if s.get("position"):
                 p = s["position"]
+                if p.get("exit_reason") == ABANDONED:
+                    return "进程被强制结束，持仓记录作废"
                 return "已开仓" if p.get("exit_ms") is None else f"已平仓（{p.get('exit_reason')}）"
         for s in r["signals"]:
             for d in s.get("decisions", []):

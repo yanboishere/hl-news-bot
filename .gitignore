@@ -28,3 +28,11 @@ macos/.build/
 macos/build/
 .swiftpm/
 data/.fuse_hidden*
+
+# ops/memoh: supervisor and keep-alive state (Memoh cloud computer)
+data/hlnews.lock
+data/supervisor.*
+data/ui.out
+data/*.out.*
+data/*.log.*
+data/backup/

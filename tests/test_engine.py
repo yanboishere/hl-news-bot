@@ -85,3 +85,25 @@ def test_replay_fixture_end_to_end(engine):
     assert n_classified == 14                            # 15 lines, the repeated Datavault story is deduplicated
     iran = engine.store.conn.execute("select reason from classifications where news_id='nl_4614262'").fetchone()[0]
     assert "item rating not applied" in iran
+
+
+def test_positions_left_open_by_a_killed_run_are_settled_on_start(engine, cfg):
+    """SIGKILL / workspace stop: the old process never flattened. Paper records are closed as abandoned and kept out of
+    the stats; live records stay open and raise a halt alert (the position may still be on the exchange)."""
+    from hlnews.store import ABANDONED, Store
+
+    run(engine.handle(nl_news_item(ws_item("k1", "Bloomberg: big BTC news", ["BTC"], score=86))))
+    (paper,) = engine.state.open
+    live = paper.__class__(**{**paper.__dict__, "id": "live-1", "coin": "ETH", "mode": "live"})
+    engine.store.position(live)
+
+    fresh = engine.__class__(cfg, Store(cfg["storage"]["sqlite_path"]), engine.hl, [])   # the next process
+    run(fresh._settle_orphans())
+    rows = {r[0]: r for r in fresh.store.conn.execute("select id, exit_ms, exit_reason, pnl_usd from positions").fetchall()}
+    assert rows[paper.id][2] == ABANDONED and rows[paper.id][1] and rows[paper.id][3] is None
+    assert rows["live-1"][1] is None                       # not touched
+    assert fresh.store.summary()["closed"] == 0           # abandoned records are not trades
+    kinds = [a["kind"] for a in fresh.store.alerts()]
+    assert "close" in kinds and "halt" in kinds
+    run(fresh._settle_orphans())                           # idempotent: the paper record is already closed
+    assert [r["id"] for r in fresh.store.open_position_rows()] == ["live-1"]

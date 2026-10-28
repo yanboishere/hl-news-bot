@@ -137,7 +137,38 @@ class Engine:
         return self.mw_start <= hm <= self.mw_end
 
     # ------------------------------------------------------------------ lifecycle
+    async def _settle_orphans(self) -> None:
+        """Positions an earlier process left open: it was killed before it could flatten (SIGKILL, workspace stop).
+        Paper records are closed as restart_abandoned (no P&L, out of the stats); live ones are only reported, since the
+        position may still exist on the exchange and this process does not take it over."""
+        try:
+            rows = self.store.open_position_rows()
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not read open positions left by an earlier run: %s", e)
+            return
+        if not rows:
+            return
+        paper = [r for r in rows if r.get("mode") != "live"]
+        live = [r for r in rows if r.get("mode") == "live"]
+
+        def names(rs: list[dict]) -> str:
+            return "、".join(f"{r.get('coin')} {r.get('direction')}" for r in rs[:8]) + ("…" if len(rs) > 8 else "")
+
+        if paper:
+            self.store.mark_abandoned([r["id"] for r in paper], now_ms())
+            log.warning("closed the records of %d paper position(s) left open by an earlier run: %s", len(paper), names(paper))
+            await self.alerter.send("close", f"上次运行留下 {len(paper)} 笔模拟持仓",
+                                    f"上次进程被强制结束（工作区停止或 kill -9），没来得及平仓：{names(paper)}。"
+                                    "已记为 restart_abandoned，没有盈亏，不计入统计。", {"positions": [r["id"] for r in paper]})
+        if live:
+            log.error("%d live position(s) from an earlier run have no exit record: %s", len(live), names(live))
+            await self.alerter.send("halt", f"上次运行留下 {len(live)} 笔实盘持仓没有平仓记录",
+                                    f"{names(live)}。bot 重启后不会接管它们；交易所侧止损单还在。"
+                                    "请到 Hyperliquid 核对并手动处理，处理完这些记录会一直显示为持仓中。",
+                                    {"positions": [r["id"] for r in live]})
+
     async def run(self) -> None:
+        await self._settle_orphans()
         tasks = [asyncio.create_task(self._pump(f)) for f in self.feeds]
         tasks.append(asyncio.create_task(self._consume()))
         tasks.append(asyncio.create_task(self._manage_positions()))
