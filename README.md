@@ -2,7 +2,7 @@
 
 > 一个在 Hyperliquid 永续合约上做新闻事件交易的 Python bot。新闻的采集和判断交给 **NewsLiquid**（6551 OpenNews）：它聚合约 85 个来源，给每条新闻打 0–100 的 AI 影响分和多空方向，并对每个相关币种单独打分；bot 不读标题，只按评分、来源策略和事件模板决定开不开仓。定时宏观数据（BLS 的 CPI、非农）和 Hyperliquid 新上币仍由 bot 自己从一手源直采。过风控闸后按模板开仓，止损挂在交易所、止盈和时间止损在本地。默认 **paper 模式**：真实新闻、真实价格、模拟成交，不碰钱。
 
-这份 README 分两部分。**第一部分是运行手册**：每一条新闻进来之后发生了什么、为什么是这样设计、哪个参数管哪件事、出了问题去哪看。**第二部分是 2026-10-01 的架构设计与可行性结论**：延迟预算、实证数据、事件模板的来源、最小资金、以及对"200% 年化"这个问题的数学回答；其中信息层（自建爬虫 + 规则/LLM 分类）已在 2026-10-28 被 NewsLiquid 取代，见第 15 节。第二部分同时以独立文件保存在 [`docs/HL-news-bot-design.md`](docs/HL-news-bot-design.md)。
+这份 README 分两部分。**第一部分是运行手册**：每一条新闻进来之后发生了什么、为什么是这样设计、哪个参数管哪件事、出了问题去哪看。**第二部分是 2026-10-01 的架构设计与可行性结论**：延迟预算、实证数据、事件模板的来源、最小资金、以及对"200% 年化"这个问题的数学回答；其中信息层（自建爬虫 + 规则/LLM 分类）已在 2026-10-28 被 NewsLiquid 取代，见第 15 节。第二部分同时以独立文件保存在 [`docs/HL-news-bot-design.md`](docs/HL-news-bot-design.md)。想先看全貌，直接看[第 0 节的五张图](#0-总览流程图与架构)：总流程、信息来源、注册与接入、决策流程和模块架构。
 
 ---
 
@@ -10,6 +10,12 @@
 
 **第一部分：运行手册**
 
+0. [总览：流程图与架构](#0-总览流程图与架构)
+   - 0.1 [总流程：从注册到平仓](#01-总流程从注册到平仓)
+   - 0.2 [信息从哪来](#02-信息从哪来)
+   - 0.3 [注册与接入 NewsLiquid](#03-注册与接入-newsliquid)
+   - 0.4 [一条新闻怎么变成一笔交易](#04-一条新闻怎么变成一笔交易)
+   - 0.5 [模块架构](#05-模块架构)
 1. [这套系统在赌什么](#1-这套系统在赌什么)
 2. [十分钟跑起来](#2-十分钟跑起来)
 3. [一条新闻的完整生命周期](#3-一条新闻的完整生命周期)
@@ -52,6 +58,221 @@
 - [B11. 部署](#b11-部署)
 - [B12. 失败模式清单](#b12-失败模式清单)
 - [B13. 已交付代码与下一步](#b13-已交付代码与下一步)
+
+---
+
+## 0. 总览：流程图与架构
+
+一句话：**NewsLiquid 负责收集新闻并用 AI 打分，bot 负责把分数变成交易**：把币种标签对应到 Hyperliquid 合约，按门槛和来源规则筛选，过风控，下单，管理持仓。CPI、非农和 Hyperliquid 新上币不经过 NewsLiquid，由 bot 从一手源直采。下面五张图从粗到细；更细的内容在第 2、3、4、7、14、15 节。
+
+### 0.1 总流程：从注册到平仓
+
+```mermaid
+flowchart TD
+    subgraph prep["① 准备（只做一次）"]
+        direction LR
+        P1["注册 NewsLiquid<br/>Google 或钱包登录"] --> P2["创建 token<br/>选免费、积分或订阅"]
+        P2 --> P3["写进 .env<br/>OPENNEWS_TOKEN"]
+        P3 --> P4["改 config.yaml<br/>按套餐设 transport、poll_s"]
+        P4 --> P5["回放验证<br/>--replay data/replay.jsonl"]
+    end
+
+    subgraph live["② 运行（python -m hlnews.run 常驻）"]
+        direction TB
+        I1["NewsLiquid<br/>约 85 个来源 + AI 评分"]
+        I2["bls.gov + ForexFactory<br/>CPI、非农实际值和预期"]
+        I3["Hyperliquid meta<br/>新上币"]
+        Q["统一入队"]
+        F1["过滤<br/>过时、重复、维护窗口"]
+        F2["判断<br/>NewsLiquid 评分<br/>宏观算术、上币"]
+        F3["逐币筛选<br/>模板、新鲜度<br/>分数门槛、二源佐证"]
+        F4["风控闸：11 道检查<br/>算仓位、止损、止盈"]
+        I4["Hyperliquid 行情（每 2 秒）<br/>盘口（下单前查一次）"]
+        F5["下单<br/>paper：模拟成交<br/>live：IOC + 交易所止损"]
+        F6["持仓管理（每秒）<br/>止损、止盈、时间止损"]
+        I1 -->|"WS 推送（Max）<br/>或 REST 轮询"| Q
+        I2 --> Q
+        I3 --> Q
+        Q --> F1 --> F2 --> F3 --> F4 --> F5 --> F6
+        I4 -.-> F4
+    end
+
+    subgraph obs["③ 观察与调整"]
+        direction TB
+        O1["控制台<br/>python -m hlnews.ui"]
+        O2["报警<br/>Telegram、macOS 通知"]
+        O3["SQLite 复盘<br/>评分 vs 之后的价格"]
+        O4["NewsLiquid 后台<br/>额度、扣费"]
+    end
+
+    prep --> live --> obs
+```
+
+三个阶段：准备只做一次；运行就是 `python -m hlnews.run` 常驻；观察阶段看控制台、报警和数据库，必要时回到第 ① 步调门槛、订阅的来源或套餐。
+
+### 0.2 信息从哪来
+
+```mermaid
+flowchart LR
+    subgraph src["原始来源（约 85 个）"]
+        S1["news 55 个<br/>Bloomberg、Reuters<br/>FT、CNBC<br/>CoinDesk、The Block<br/>金十、BWEnews<br/>推特 KOL、Truth Social<br/>美国财政部、欧央行<br/>新闻稿"]
+        S2["listing 9 个<br/>Binance、Coinbase<br/>OKX、Bybit<br/>Upbit、Bithumb<br/>Robinhood、Aster<br/>Hyperliquid<br/>的上币公告"]
+        S3["其余四个引擎<br/>onchain 2、market 6<br/>meme 1、prediction 12"]
+    end
+
+    subgraph nl["NewsLiquid（6551 OpenNews）"]
+        N1["采集、打币种标签<br/>BTC、ETH、XYZ-NVDA …"]
+        N2["AI 评分<br/>总分 0–100 和方向<br/>每个币单独打分"]
+        N1 --> N2
+    end
+
+    subgraph fp["一手数据（bot 直采）"]
+        F1["bls.gov 发布页<br/>CPI、非农实际值"]
+        F2["ForexFactory 周历<br/>预期值"]
+        F3["Hyperliquid meta<br/>新上币"]
+        F4["Hyperliquid<br/>allMids、l2Book<br/>行情与滑点"]
+    end
+
+    BOT(["hl-news-bot"])
+
+    S1 --> N1
+    S2 --> N1
+    S3 --> N1
+    N2 -->|"默认订阅 news + listing<br/>WS 推送或 REST 轮询"| BOT
+    F1 --> BOT
+    F2 --> BOT
+    F3 --> BOT
+    F4 --> BOT
+```
+
+默认只订阅 NewsLiquid 的 news 和 listing 两个引擎；另外四个引擎要用的话，在 `feeds.newsliquid.engine_types` 里加上，并给对应的事件类配模板（第 11 节）。
+
+### 0.3 注册与接入 NewsLiquid
+
+```mermaid
+flowchart TD
+    A["打开 app.newsliquid.com/mcp<br/>（文档里也写作 6551.io/mcp）"] --> B{"登录 / 注册"}
+    B -->|"Google"| B1["Google 账号授权"]
+    B -->|"钱包"| B2["EVM 钱包（MetaMask 等）<br/>或 Solana 钱包<br/>（Phantom 等）<br/>签名 + 人机验证"]
+    B1 --> C["注册时可填邀请码<br/>（可选）"]
+    B2 --> C
+    C --> D["创建 token 并复制<br/>（要过人机验证）<br/>「刷新」换新 token<br/>旧的作废"]
+    D --> E{"选额度"}
+    E -->|"先验证"| E1["免费<br/>每天 100 条"]
+    E -->|"按量付"| E2["一次性买积分（USDT 付款）<br/>1 USDT = 500 积分<br/>买的积分不过期"]
+    E -->|"订阅"| E3["Plus 1.9U（2 万条）<br/>Pro 29U（20 万条）<br/>Max 99U/月（实时推送）<br/>按月或按年<br/>价格以 MCP 页面为准"]
+    E3 --> F{"付款方式"}
+    F -->|"默认"| F1["加密货币<br/>填邮箱，跳转付款页"]
+    F -->|"取消勾选"| F2["付款二维码<br/>或链接"]
+    E1 --> G["写进 .env<br/>OPENNEWS_TOKEN=…"]
+    E2 --> G
+    F1 --> G
+    F2 --> G
+    G --> H{"套餐含实时推送<br/>（Max）？"}
+    H -->|"是"| H1["transport: auto 或 ws"]
+    H -->|"否"| H2["transport: rest<br/>poll_s：Pro 15 秒<br/>Plus 180 秒、免费 900 秒"]
+    H1 --> I["python -m hlnews.run<br/>先跑 10 分钟"]
+    H2 --> I
+    I --> J["回 MCP 页面<br/>看调用日志和计费规则<br/>核对每次扣多少<br/>再调 poll_s 或换套餐"]
+```
+
+额度单位没有公开文档说清楚，第一次跑起来后一定要到 MCP 页面核对实际扣费，见第 15 节。
+
+### 0.4 一条新闻怎么变成一笔交易
+
+```mermaid
+flowchart TD
+    N["一条新闻进队列"] --> A{"过时、重复，<br/>或在维护窗口？"}
+    A -->|"是"| X1["只落库"]
+    A -->|"否"| D{"哪一类条目"}
+    D -->|"NewsLiquid"| D1["引擎决定事件类<br/>标签对应合约<br/>有逐币评分就用逐币的<br/>低于 60 分没有方向<br/>多资产又没逐币评分<br/>不套用整条评分"]
+    D -->|"BLS 发布"| D2["实际值减预期<br/>偏热做空，偏冷做多"]
+    D -->|"HL 新上币"| D3["方向待定<br/>开仓前看 3 秒首批成交"]
+    D1 --> E{"有方向、<br/>有标的？"}
+    D2 --> E
+    D3 --> E
+    E -->|"否"| X2["判断落库，不交易"]
+    E -->|"是"| F["逐个币检查<br/>股票永续用<br/>nl_news_stock 模板"]
+    F --> G{"有模板，<br/>且新闻够新鲜？"}
+    G -->|"否"| X2
+    G -->|"是"| I{"分数 ≥ 门槛？<br/>默认 80 分"}
+    I -->|"否"| X2
+    I -->|"是"| J{"推特等单一来源，<br/>还没有第二来源？"}
+    J -->|"是"| X3["等第二个来源<br/>REST 临时提速"]
+    J -->|"否"| K["生成信号<br/>模板带 alert 就报警"]
+    K --> L{"模板<br/>trade: false？"}
+    L -->|"是"| X4["只报警"]
+    L -->|"否"| M{"风控闸<br/>11 道检查"}
+    M -->|"不过"| X5["记下拒绝原因"]
+    M -->|"过"| O["开仓<br/>paper：模拟成交<br/>live：IOC 限价<br/>+ 交易所止损单"]
+    O --> P["每秒检查<br/>止损、止盈、时间止损<br/>维护窗口前平仓"]
+    P --> R["平仓<br/>更新权益、亏损冷却<br/>日亏熔断"]
+```
+
+每一个"否"都会在数据库里留下记录：判断在 `classifications` 表，拒绝原因在 `decisions` 表。控制台的"新闻与决策"页按这张图把每条新闻的去向写出来。风控闸的 11 道检查见第 4.6 节。
+
+### 0.5 模块架构
+
+```mermaid
+flowchart TB
+    NLAPI["NewsLiquid<br/>WebSocket 推送<br/>REST 轮询"]:::ext
+    BLS["bls.gov<br/>ForexFactory"]:::ext
+    HLINFO["Hyperliquid /info<br/>meta、行情、盘口、账户"]:::ext
+    CFG["config.yaml<br/>.env"]:::file
+
+    subgraph bot["bot 进程：python -m hlnews.run"]
+        RUN["run.py<br/>读配置、组装模块<br/>源健康报警"]
+        NL["newsliquid.py<br/>新闻 + AI 评分"]
+        MC["macro.py<br/>CPI、非农"]
+        FD["feeds.py<br/>HL 新上币、回放"]
+        EN["engine.py<br/>队列、去重、逐币决策<br/>二源佐证、持仓管理"]
+        CL["classify.py<br/>评分 → 方向和置信"]
+        RK["risk.py<br/>风控闸、仓位"]
+        HL["hl.py<br/>行情、滑点<br/>paper / live 下单"]
+        ST["store.py"]
+        AL["alerts.py"]
+    end
+
+    HLEX["Hyperliquid /exchange<br/>下单、撤单（live）"]:::ext
+    DB[("data/hlnews.db")]:::file
+    FILES["data/state.json<br/>data/hlnews.log"]:::file
+    TG["Telegram<br/>macOS 通知"]:::ext
+
+    subgraph console["控制台（另一个进程）"]
+        MAC["macOS 应用"]
+        UI["ui.py + ui_static<br/>127.0.0.1:8765"]
+        BT["backtest.py"]
+    end
+
+    CFG --> RUN
+    NLAPI --> NL
+    BLS --> MC
+    HLINFO --> FD
+    HLINFO --> HL
+    RUN --> NL
+    RUN --> FD
+    NL --> EN
+    MC --> EN
+    FD --> EN
+    EN <--> CL
+    EN <--> RK
+    EN --> HL
+    EN --> ST
+    EN --> AL
+    EN --> FILES
+    HL --> HLEX
+    ST --> DB
+    AL --> TG
+    DB --> UI
+    FILES --> UI
+    MAC --> UI
+    UI --> BT
+
+    classDef ext fill:#f6f8fa,stroke:#8c959f,color:#24292f
+    classDef file fill:#e8f5e9,stroke:#4c9a5a,color:#24292f
+```
+
+灰色是外部服务，绿色是本地文件，紫色是代码模块；`macro.py` 由 `engine.py` 启动，其余数据源由 `run.py` 组装。一个 bot 进程、一个 asyncio 事件循环。控制台是另一个进程：只读数据库、读 state.json 和日志，另外还能改 `config.yaml`、启停 bot（图里没画这两条回边，免得线绕回去）。并发细节见第 7 节，控制台见第 14 节。
 
 ---
 
