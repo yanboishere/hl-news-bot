@@ -8,7 +8,10 @@ Sources used:
   schedule   : https://www.bls.gov/schedule/news_release/{cpi,empsit}.htm  (parsed once a day)
   consensus  : https://nfs.faireconomy.media/ff_calendar_thisweek.json      (forecast/previous; no 'actual')
   release    : https://www.bls.gov/news.release/cpi.nr0.htm and empsit.nr0.htm (poll from T-2s, 0.7 s interval, 20 s window)
-  FOMC       : https://www.federalreserve.gov/newsevents/pressreleases/monetary{YYYYMMDD}a.htm
+
+This is a first-party data lane, kept when NewsLiquid replaced the news feeds: the emitted item carries the parsed
+numbers and the consensus in raw, and classify.classify_macro turns them into a direction by arithmetic (no text
+parsing). FOMC decisions are not polled here; they reach the bot as NewsLiquid news.
 """
 from __future__ import annotations
 

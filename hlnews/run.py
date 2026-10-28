@@ -1,10 +1,11 @@
 """Entry point.
 
-  python -m hlnews.run                       # paper mode, live feeds (Tree of Alpha + HL listings)
-  python -m hlnews.run --replay data/replay.jsonl --speed 0   # replay a JSONL of headlines through the full pipeline
+  python -m hlnews.run                       # paper mode, live feeds (NewsLiquid + HL listings + BLS macro)
+  python -m hlnews.run --replay data/replay.jsonl --speed 0   # replay NewsLiquid records through the full pipeline
   python -m hlnews.run --summary             # print P&L summary from the SQLite store
 
-Live mode: set mode: live in config.yaml and export HL_AGENT_KEY / HL_ACCOUNT. Never put the master key here.
+News needs a NewsLiquid token: export OPENNEWS_TOKEN (https://6551.io/mcp). Live trading additionally needs
+mode: live in config.yaml and HL_AGENT_KEY / HL_ACCOUNT in the environment. Never put the master key here.
 """
 from __future__ import annotations
 
@@ -21,7 +22,13 @@ import yaml
 from . import feeds as F
 from .engine import Engine
 from .hl import HLClient
+from .newsliquid import newsliquid_feed
 from .store import Store
+
+# feed health -> alerts. Only transitions are pushed: one alert when a problem starts, one when it clears.
+_NL_PROBLEM = {"ws_down": "WebSocket 断开", "ws_refused": "WebSocket 不可用（未开通实时推送或 token 无效），改用 REST 轮询",
+               "rest_fail": "REST 连续失败", "auth_fail": "token 缺失或无效", "quota": "额度用完或被限流"}
+_NL_RECOVER = {"ws_up": "WebSocket 已连接", "rest_ok": "REST 轮询恢复"}
 
 
 def load_cfg(path: str) -> dict:
@@ -53,37 +60,24 @@ async def main_async(cfg: dict, args: argparse.Namespace) -> None:
     fc = cfg["feeds"]
     if args.replay:
         feed_list.append(F.replay_feed(args.replay, speed=args.speed))
-    else:
-        if fc["treeofalpha"]["enabled"]:
-            feed_list.append(F.treeofalpha_feed(fc["treeofalpha"]["ws_url"], fc["treeofalpha"].get("api_key", ""), float(fc["treeofalpha"].get("max_age_s", 20))))
-        if fc["hl_listings"]["enabled"]:
-            feed_list.append(F.hl_listings_feed(hl.info_post, poll_s=float(fc["hl_listings"].get("poll_s", 5)), dexs=tuple(cfg["hyperliquid"]["perp_dexs"])))
-        if fc["telegram"]["enabled"]:
-            tg = fc["telegram"]
-            feed_list.append(F.telegram_feed(int(tg["api_id"]), tg["api_hash"], tg["session"], list(tg["channels"])))
-        gn = fc.get("google_news") or {}
-        if gn.get("enabled"):
-            feed_list.append(F.google_news_feed(list(gn.get("queries") or []), poll_s=float(gn.get("poll_s", 90)), hl=str(gn.get("hl", "en-US"))))
-        ws = fc.get("wallstreetcn") or {}
-        if ws.get("enabled"):
-            feed_list.append(F.wallstreetcn_feed(poll_s=float(ws.get("poll_s", 15)), fast_poll_s=float(ws.get("fast_poll_s", 5))))
-        c = fc.get("cls") or {}
-        if c.get("enabled"):
-            feed_list.append(F.cls_feed(poll_s=float(c.get("poll_s", 3)), fast_poll_s=float(c.get("fast_poll_s", 1))))
+    elif (fc.get("hl_listings") or {}).get("enabled"):
+        feed_list.append(F.hl_listings_feed(hl.info_post, poll_s=float(fc["hl_listings"].get("poll_s", 5)), dexs=tuple(cfg["hyperliquid"]["perp_dexs"])))
     engine = Engine(cfg, store, hl, feed_list)
-    if not args.replay:
-        j10 = fc.get("jin10") or {}
-        if j10.get("enabled"):
-            async def _j10_health(status: str, detail: str) -> None:
-                if status in ("ws_down", "rest_fail"):
-                    await engine.alerter.send("feed", f"金十数据源：{status}", detail, {"source": "jin10", "status": status})
-                elif status == "ws_up" and engine.feed_was_down.pop("jin10", False):
-                    await engine.alerter.send("feed", "金十数据源恢复", detail, {"source": "jin10", "status": status})
-                if status in ("ws_down", "rest_fail"):
-                    engine.feed_was_down["jin10"] = True
-            engine.add_feed(F.jin10_feed(poll_s=float(j10.get("poll_s", 5)), fast_poll_s=float(j10.get("fast_poll_s", 2)), url=j10.get("url") or F.JIN10_FLASH_URL,
-                                         headers=j10.get("headers") or None, types=tuple(j10.get("types") or (0, 1)),
-                                         ws=bool(j10.get("ws", True)), ws_url=str(j10.get("ws_url") or F.JIN10_WS_URL), on_health=_j10_health))
+    nlc = fc.get("newsliquid") or {}
+    if not args.replay and nlc.get("enabled", True):
+        async def _nl_health(status: str, detail: str) -> None:
+            down = engine.feed_was_down
+            if status in _NL_PROBLEM:
+                if down.get(f"newsliquid:{status}"):
+                    return          # already reported, wait for recovery
+                down[f"newsliquid:{status}"] = True
+                down["newsliquid"] = True
+                await engine.alerter.send("feed", f"NewsLiquid：{_NL_PROBLEM[status]}", detail, {"source": "newsliquid", "status": status})
+            elif status in _NL_RECOVER and down.pop("newsliquid", False):
+                for k in [k for k in down if k.startswith("newsliquid:")]:
+                    down.pop(k, None)
+                await engine.alerter.send("feed", f"NewsLiquid：{_NL_RECOVER[status]}", detail, {"source": "newsliquid", "status": status})
+        engine.add_feed(newsliquid_feed(nlc, on_health=_nl_health))
 
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()

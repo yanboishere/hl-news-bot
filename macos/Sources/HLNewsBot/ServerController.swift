@@ -90,7 +90,7 @@ final class ServerController: ObservableObject {
         p.currentDirectoryURL = URL(fileURLWithPath: repoPath)
         var env = ProcessInfo.processInfo.environment
         env["PYTHONUNBUFFERED"] = "1"
-        // Load <repo>/.env (KEY=VALUE lines) so HL_AGENT_KEY / HL_ACCOUNT / ANTHROPIC_API_KEY reach the bot without
+        // Load <repo>/.env (KEY=VALUE lines) so OPENNEWS_TOKEN / HL_AGENT_KEY / HL_ACCOUNT reach the bot without
         // living in the shell profile. The file is git-ignored.
         for (k, v) in ServerController.readDotEnv(URL(fileURLWithPath: repoPath).appendingPathComponent(".env")) where env[k] == nil { env[k] = v }
         p.environment = env
