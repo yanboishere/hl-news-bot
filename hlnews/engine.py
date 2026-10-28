@@ -1,4 +1,5 @@
-"""Engine: feeds -> dedup -> rules lane (+ optional LLM lane) -> fusion -> risk gate -> execution -> position manager."""
+"""Engine: feeds -> dedup -> classify (NewsLiquid rating / BLS arithmetic / HL listing) -> per-coin template,
+threshold and source policy -> risk gate -> execution -> position manager."""
 from __future__ import annotations
 
 import asyncio
@@ -10,9 +11,9 @@ from collections import deque
 from typing import AsyncIterator
 
 from .alerts import Alerter
-from .classify import RuleContext, classify_llm, classify_rules, is_trusted_source
+from .classify import ClassifyContext, classify, event_class_for
 from .hl import HLClient
-from .models import Classification, Direction, EventClass, NewsItem, Position, Signal, new_id, now_ms
+from .models import Direction, EventClass, NewsItem, Position, Signal, new_id, now_ms
 from .risk import AccountState, RiskGate
 from .store import Store
 
@@ -60,17 +61,17 @@ class Dedup:
 
 
 class Corroboration:
-    """Track (event_class, coin, direction) sightings so 'two sources' rules can be applied.
-    The window is per event class: a hack has a second source within 90 s, a Nikkei capacity story may take an hour."""
+    """Track (event_class, coin, direction) sightings from distinct sources so 'two sources' policies can be applied.
+    The window is per event class (stock news diffuses slower than crypto news)."""
 
     def __init__(self, window_s: float, by_class: dict[str, float] | None = None):
         self.window_ms = int(window_s * 1000)
         self.by_class = {k: int(v * 1000) for k, v in (by_class or {}).items()}
         self.hits: dict[tuple[str, str, str], list[tuple[int, str]]] = {}
 
-    def add(self, c: Classification, coin: str, source_key: str, ts: int) -> int:
-        k = (c.event_class.value, coin, c.direction.value)
-        win = self.by_class.get(c.event_class.value, self.window_ms)
+    def add(self, event_class: str, coin: str, direction: str, source_key: str, ts: int) -> int:
+        k = (event_class, coin, direction)
+        win = self.by_class.get(event_class, self.window_ms)
         lst = self.hits.setdefault(k, [])
         lst[:] = [(t, s) for (t, s) in lst if ts - t <= win]
         if all(s != source_key for _, s in lst):
@@ -86,23 +87,24 @@ class Engine:
         self.feeds = feeds
         self.mode = cfg.get("mode", "paper")
         uni = set(cfg["universe"]["crypto"]) | set(cfg["universe"]["stocks"])
-        rules_cfg = cfg["classifier"]["rules"]
-        self.ctx = RuleContext(
-            aliases={k.lower(): v for k, v in cfg["universe"]["ticker_aliases"].items()},
+        rating_cfg = cfg.get("rating") or {}
+        self.ctx = ClassifyContext(
+            symbol_map={str(k).strip().upper(): str(v) for k, v in (cfg["universe"].get("symbol_map") or {}).items()},
             universe=uni,
-            trusted_accounts=set(rules_cfg.get("trusted_accounts", [])),
-            sectors=cfg.get("sectors") or {},
-            strong_publishers=set(rules_cfg.get("strong_publishers", [])),
+            min_score=float(rating_cfg.get("min_score", 0)),
+            use_coin_rating=bool(rating_cfg.get("use_coin_rating", True)),
+            item_rating_fallback=str(rating_cfg.get("item_rating_fallback", "single")).lower(),
         )
-        self.require_two = set(rules_cfg.get("require_two_sources_for", []))
-        self.corr = Corroboration(float(rules_cfg.get("corroboration_window_s", 90)), rules_cfg.get("corroboration_window_by_class") or {})
+        # source policy: NewsLiquid newsTypes (lower-case) whose items need a second, different source agreeing on
+        # (class, coin, direction) inside the window before a position opens -- a lone tweet never trades
+        self.require_two_sources = {str(s).strip().lower() for s in rating_cfg.get("require_two_sources_for") or []}
+        self.corr = Corroboration(float(rating_cfg.get("corroboration_window_s", 90)), rating_cfg.get("corroboration_window_by_class") or {})
         self.alerter = Alerter(cfg, store)
         self.feed_was_down: dict[str, bool] = {}
         self._alert_recent: dict[tuple[str, str, str], int] = {}
         self.alert_dedup_ms = int(float((cfg.get("alerts") or {}).get("dedup_s", 21600)) * 1000)
         self.dedup = Dedup()
         self.templates = cfg["templates"]
-        self.llm_cfg = cfg["classifier"]["llm"]
         eq = float(cfg["account"]["equity_usd"])
         self.state = AccountState(equity_usd=eq, day_start_equity=eq, week_start_equity=eq)
         self.risk = RiskGate(cfg["account"], hl.max_lev)
@@ -111,7 +113,7 @@ class Engine:
         self._week = time.gmtime().tm_yday // 7
         self._order_failures = 0
         self._last_news_ms = 0
-        self.max_age_s = float(cfg["feeds"].get("max_age_s", 20))
+        self.max_age_s = float(cfg["feeds"].get("max_age_s", 120))
         self.max_age_by_source = {k: float(v) for k, v in (cfg["feeds"].get("max_age_by_source") or {}).items()}
         mw = cfg.get("maintenance_window") or {}
         self.mw_enabled = bool(mw.get("enabled", True))
@@ -259,105 +261,77 @@ class Engine:
             log.info("maintenance window, not opening: %s", item.title[:80])
             return []
         t_recv = now_ms()
-        rc = classify_rules(item, self.ctx)
-        self.store.classification(item.id, rc, now_ms())
-        final = rc
-        # LLM lane: only when the rules result is not good enough on its own, i.e. noise / no direction / below the
-        # template threshold of its own event class (ETF, regulatory and depeg use 0.85, so even a trusted-source 0.80
-        # goes to the LLM for confirmation). Runs concurrently with a price refresh.
-        need_llm = rc.event_class is EventClass.NOISE or rc.direction is Direction.NONE or rc.confidence < self._min_conf(rc.event_class)
-        if self.llm_cfg.get("enabled") and need_llm:
-            lc, _ = await asyncio.gather(classify_llm(item, self.llm_cfg), self.hl.refresh_mids(), return_exceptions=False)
-            if lc:
-                self.store.classification(item.id, lc, now_ms())
-                final = self._fuse(rc, lc)
-                if final is not rc and final is not lc:
-                    self.store.classification(item.id, final, now_ms())
+        final = classify(item, self.ctx)
+        self.store.classification(item.id, final, now_ms())
         if final.event_class is EventClass.NOISE or final.direction is Direction.NONE or not final.tickers:
             return []
-        from .feeds import set_hot
-
-        set_hot(120)   # a directional headline arrived: fetch the polling sources fast so corroboration lands quickly
-        if final.is_rumor:
-            log.info("rumor, skip: %s", item.title[:100])
-            return []
-        template = self.templates.get(final.event_class.value)
-        if not template:
-            return []
-        # per-class freshness: a 2-hour-old hack headline must not enter a 90-minute template; a 2-hour-old capacity story may
-        max_news_age = template.get("max_news_age_s")
-        if item.source != "replay" and max_news_age is not None and item.age_s > float(max_news_age):
-            log.info("too old for %s (%.0fs > %ss): %s", final.event_class.value, item.age_s, max_news_age, item.title[:80])
-            return []
         signals: list[Signal] = []
-        trusted = is_trusted_source(item, self.ctx)
-        alerted = False
+        src = (item.channel or "").strip().lower()
+        src_key = f"{item.source}:{src}"
         for coin in final.tickers:
             if coin not in self.ctx.universe and final.event_class is not EventClass.LISTING_HL:
                 continue
-            src_key = f"{item.source}:{item.account or item.channel}"
-            n_sources = self.corr.add(final, coin, src_key, item.recv_ms)
-            if final.event_class.value in self.require_two and not trusted and n_sources < 2:
-                log.info("waiting for corroboration (%d source) %s %s: %s", n_sources, final.event_class.value, coin, item.title[:90])
+            # NewsLiquid rates each coin on its own when it can: BTC long 85 and ETH short 45 in one item stay separate
+            pt = final.per_ticker.get(coin) or {}
+            direction = Direction(pt["direction"]) if pt else final.direction
+            confidence = float(pt.get("confidence", final.confidence)) if pt else final.confidence
+            if direction is Direction.NONE:
+                continue
+            ec = event_class_for(final.event_class, coin)
+            template = self.templates.get(ec.value)
+            if not template:
+                log.debug("no template for %s, skip %s", ec.value, coin)
+                continue
+            # per-class freshness: a 30-minute-old crypto headline must not enter a 60-minute template; stock news may be older
+            max_news_age = template.get("max_news_age_s")
+            if item.source != "replay" and max_news_age is not None and item.age_s > float(max_news_age):
+                log.info("too old for %s (%.0fs > %ss): %s", ec.value, item.age_s, max_news_age, item.title[:80])
+                continue
+            if confidence < float(template.get("min_conf", 0.8)):
+                log.debug("below %s threshold (%.2f < %s) %s: %s", ec.value, confidence, template.get("min_conf"), coin, item.title[:80])
+                continue
+            n_sources = self.corr.add(ec.value, coin, direction.value, src_key, item.recv_ms)
+            if src in self.require_two_sources and n_sources < 2:
+                from .feeds import set_hot
+
+                # poll NewsLiquid REST fast for a while (when REST is the transport) so the second source lands quickly.
+                # Only here: a hot window after every directional item would multiply the REST quota.
+                set_hot(min(120.0, float(self.corr.by_class.get(ec.value, self.corr.window_ms)) / 1000.0))
+                log.info("waiting for a second source (%s, %d so far) %s %s %s: %s", item.channel, n_sources, ec.value, direction.value, coin, item.title[:90])
                 continue
             sig = Signal(
-                id=new_id("sig"), news_id=item.id, coin=coin, direction=final.direction, event_class=final.event_class,
-                confidence=final.confidence, created_ms=now_ms(), template=template, reason=final.reason,
+                id=new_id("sig"), news_id=item.id, coin=coin, direction=direction, event_class=ec,
+                confidence=confidence, created_ms=now_ms(), template=template, reason=final.reason,
                 news_age_s=(t_recv - item.ts_ms) / 1000.0,
             )
             self.store.signal(sig)
             signals.append(sig)
-            # key-news alert: once per headline, only when the signal clears the class threshold, and not again for the
-            # same (class, coins, direction) within alerts.dedup_s -- a Nikkei story is re-reported by ten outlets over a day
-            akey = (final.event_class.value, " ".join(sorted(c for c in final.tickers if c in self.ctx.universe)), final.direction.value)
-            fresh = now_ms() - self._alert_recent.get(akey, 0) > self.alert_dedup_ms
-            if template.get("alert") and not alerted and fresh and final.confidence >= float(template.get("min_conf", 0.8)):
-                alerted = True
+        if not signals:
+            return []
+        # key-news alert: once per item, and not again for the same (class, coins, direction) within alerts.dedup_s --
+        # a story is re-reported by many outlets over a day
+        alerting = [s for s in signals if s.template.get("alert")]
+        if alerting:
+            akey = (alerting[0].event_class.value, " ".join(sorted(s.coin for s in alerting)), alerting[0].direction.value)
+            if now_ms() - self._alert_recent.get(akey, 0) > self.alert_dedup_ms:
                 self._alert_recent[akey] = now_ms()
-                coins = [c for c in final.tickers if c in self.ctx.universe]
+                trade_any = any(s.template.get("trade", True) for s in alerting)
+                legs = " ".join(f"{s.coin} {s.direction.value} {s.confidence * 100:.0f}" for s in alerting)
+                src_label = f"NewsLiquid · {item.channel}" if isinstance(item.raw.get("nl"), dict) else item.channel
                 await self.alerter.send(
                     "key_news",
-                    f"{final.event_class.value} {final.direction.value} {' '.join(coins)}",
-                    f"{item.title[:300]}\n来源 {item.channel}{(' @' + item.account) if item.account and item.account != item.channel else ''} · 置信 {final.confidence:.2f} · {final.reason}"
-                    + ("" if template.get("trade", True) else "\n（仅报警，模板 trade: false）"),
-                    {"news_id": item.id, "url": item.url, "coins": coins, "confidence": final.confidence, "trade": bool(template.get("trade", True))},
+                    f"{alerting[0].event_class.value} {legs}",
+                    f"{item.title[:300]}\n来源 {src_label} · {final.reason}"
+                    + ("" if trade_any else "\n（仅报警，模板 trade: false）"),
+                    {"news_id": item.id, "url": item.url, "coins": [s.coin for s in alerting],
+                     "confidence": max(s.confidence for s in alerting), "trade": trade_any},
                 )
-            if template.get("trade", True) is False:
+        for sig in signals:
+            if sig.template.get("trade", True) is False:
                 self.store.decision(sig.id, False, "alert-only template (trade: false)", now_ms())
                 continue
             await self._execute(sig)
         return signals
-
-    def _min_conf(self, ec: EventClass) -> float:
-        t = self.templates.get(ec.value) or {}
-        return float(t.get("min_conf", 0.8))
-
-    @staticmethod
-    def _fuse(rc: Classification, lc: Classification) -> Classification:
-        """Fusion policy.
-
-        1. Rules have a direction and both lanes agree  -> rules result, confidence lifted to max(rules, min(llm, 0.85)).
-           This is the only way a trusted-source 0.80 reaches the 0.85 threshold of ETF/regulatory/depeg.
-        2. Both lanes have a direction and disagree      -> no trade.
-        3. Rules have no direction (noise / none)        -> LLM decides, confidence capped at 0.85, rules' tickers preferred.
-        The LLM can never push confidence above 0.85 and never changes which source the item came from, so the
-        trusted-account / two-source checks downstream are unaffected."""
-        if rc.direction is not Direction.NONE and lc.direction is not Direction.NONE and rc.direction != lc.direction:
-            return Classification(lane="fused", event_class=rc.event_class, direction=Direction.NONE, confidence=0.0,
-                                  tickers=rc.tickers or lc.tickers, reason=f"lanes disagree: {rc.reason} / {lc.reason}",
-                                  is_rumor=rc.is_rumor or lc.is_rumor, latency_ms=rc.latency_ms + lc.latency_ms)
-        if rc.direction is not Direction.NONE:
-            if lc.direction is Direction.NONE:
-                return rc  # LLM abstained; rules stand on their own
-            conf = max(rc.confidence, min(lc.confidence, 0.85))
-            return Classification(lane="fused", event_class=rc.event_class, direction=rc.direction, confidence=conf, tickers=rc.tickers,
-                                  reason=f"{rc.reason}; llm agrees: {lc.reason}", is_rumor=rc.is_rumor or lc.is_rumor,
-                                  is_scheduled=rc.is_scheduled, magnitude_usd=rc.magnitude_usd, latency_ms=rc.latency_ms + lc.latency_ms)
-        conf = min(lc.confidence, 0.85)
-        tickers = rc.tickers or lc.tickers
-        ec = lc.event_class if rc.event_class is EventClass.NOISE else rc.event_class
-        return Classification(lane="fused", event_class=ec, direction=lc.direction, confidence=conf, tickers=tickers,
-                              reason=f"llm: {lc.reason}", is_rumor=rc.is_rumor or lc.is_rumor, latency_ms=rc.latency_ms + lc.latency_ms)
 
     # ------------------------------------------------------------------ execution
     async def _execute(self, sig: Signal) -> None:

@@ -167,10 +167,15 @@ const fmt = {
   esc(s) { return String(s ?? "").replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch])); },
 };
 const CLASS_ZH = {
-  macro_cpi: "CPI", macro_nfp: "非农", macro_fomc: "FOMC", listing_binance: "币安上币", listing_upbit: "Upbit 上币", listing_coinbase: "Coinbase 上币",
-  listing_hl: "HL 新上币", hack_exploit: "黑客 / exploit", depeg: "脱锚", etf: "ETF", regulatory: "监管", tariff: "关税", trump_policy: "特朗普政策",
-  earnings: "财报", guidance: "指引", m_and_a: "并购", supply_expansion: "同业扩产", supply_cut: "同业减产", noise: "噪音",
+  macro_cpi: "CPI", macro_nfp: "非农", listing_hl: "HL 新上币",
+  nl_news: "NewsLiquid 新闻", nl_news_stock: "NewsLiquid 美股", nl_listing: "NewsLiquid 上币", nl_onchain: "NewsLiquid 链上",
+  nl_market: "NewsLiquid 异动", nl_meme: "NewsLiquid Meme", nl_prediction: "NewsLiquid 预测", noise: "噪音",
+  // classes of the removed rules lane, kept so older rows in the database still read well
+  macro_fomc: "FOMC", listing_binance: "币安上币", listing_upbit: "Upbit 上币", listing_coinbase: "Coinbase 上币",
+  hack_exploit: "黑客 / exploit", depeg: "脱锚", etf: "ETF", regulatory: "监管", tariff: "关税", trump_policy: "特朗普政策",
+  earnings: "财报", guidance: "指引", m_and_a: "并购", supply_expansion: "同业扩产", supply_cut: "同业减产",
 };
+const LANE_ZH = { newsliquid: "NewsLiquid 评分", macro: "宏观直采", hl_listing: "HL 上币监测", none: "无评分", rules: "规则（旧）", llm: "LLM（旧）", fused: "融合（旧）" };
 const EXIT_ZH = { stop: "止损", take_profit: "止盈", time_stop: "时间止损", pre_maintenance: "维护窗口前平仓", shutdown: "进程退出平仓" };
 
 // ------------------------------------------------------------------ state
@@ -268,7 +273,7 @@ function tapeRow(r, compact) {
   </div>`;
 }
 function tapeDetail(r) {
-  const cl = (r.classifications || []).map(c => `<div>${c.lane} 车道：<b>${fmt.cls(c.event_class)}</b> ${fmt.dir(c.direction)} 置信 ${Number(c.confidence).toFixed(2)}${c.is_rumor ? " · 谣言词" : ""} · ${fmt.esc(c.reason)} <span class="quiet">(${c.latency_ms} ms)</span></div>`).join("");
+  const cl = (r.classifications || []).map(c => `<div>${LANE_ZH[c.lane] || c.lane}：<b>${fmt.cls(c.event_class)}</b> ${fmt.dir(c.direction)} ${c.lane === "newsliquid" ? "评分" : "置信"} ${c.lane === "newsliquid" ? Math.round(Number(c.confidence) * 100) : Number(c.confidence).toFixed(2)}${c.is_rumor ? " · 谣言词" : ""} · ${fmt.esc(c.reason)} <span class="quiet">(${c.latency_ms} ms)</span></div>`).join("");
   const sg = (r.signals || []).map(s => {
     const t = s.template || {}; const d = (s.decisions || []).map(x => x.accepted ? "风控通过" : `风控拒绝：${fmt.esc(x.reason)}`).join("；");
     const p = s.position;
@@ -344,7 +349,7 @@ function viewTape() {
   const rows = (S.tape || []).filter(r => !q || (r.title + " " + (r.account || "") + " " + (r.verdict?.event_class || "") + " " + (r.verdict?.outcome || "")).toLowerCase().includes(q));
   return `
     <h1>新闻与决策</h1>
-    <p>每一行先写 bot 的判断，再写新闻本身。点一行展开两条车道的分类理由、信号模板、风控结论和成交。</p>
+    <p>每一行先写 bot 的判断，再写新闻本身。新闻和评分来自 NewsLiquid，宏观数据和 HL 上币来自一手源。点一行展开评分理由、信号模板、风控结论和成交。</p>
     <div class="bar">
       <button class="lite ${S.tapeDirectional ? "" : "on"}" id="tAll">全部</button>
       <button class="lite ${S.tapeDirectional ? "on" : ""}" id="tDir">只看有方向的</button>
@@ -360,14 +365,15 @@ function renderLogLines() { return (S.log || []).map(l => { const w = /WARNING|E
 function templateTable() {
   const t = (S.cfg && S.cfg.templates) || {};
   const fields = ["hold_s", "stop_pct", "tp_pct", "risk_pct", "max_lev", "min_conf"];
-  const head = `<tr><th>事件</th><th class="num">持有(秒)</th><th class="num">止损%</th><th class="num">止盈%</th><th class="num">风险%</th><th class="num">杠杆上限</th><th class="num">置信门槛</th></tr>`;
+  const head = `<tr><th>事件</th><th class="num">持有(秒)</th><th class="num">止损%</th><th class="num">止盈%</th><th class="num">风险%</th><th class="num">杠杆上限</th><th class="num" title="NewsLiquid 类：评分 / 100">门槛</th></tr>`;
   const rows = Object.entries(t).map(([k, v]) => `<tr><td>${fmt.cls(k)} <span class="quiet">${k}</span></td>${fields.map(f => `<td class="num"><input data-cls="${k}" data-field="${f}" value="${v[f] ?? ""}" class="${S.tmplEdits[k + "." + f] != null ? "changed" : ""}"></td>`).join("")}</tr>`).join("");
   return `<table class="tmpl"><thead>${head}</thead><tbody>${rows}</tbody></table>`;
 }
 function viewControl() {
-  const bot = S.bot || {}; const st = S.state || {}; const cfg = S.cfg || {}; const acct = cfg.account || {}; const llm = (cfg.classifier || {}).llm || {}; const env = bot.env || {};
+  const bot = S.bot || {}; const st = S.state || {}; const cfg = S.cfg || {}; const acct = cfg.account || {}; const env = bot.env || {};
+  const rating = cfg.rating || {}; const nl = (cfg.feeds || {}).newsliquid || {}; const tp = nl.transport || "auto";
   const liveOk = env.HL_AGENT_KEY && env.HL_ACCOUNT;
-  const trusted = (((cfg.classifier || {}).rules || {}).trusted_accounts || []).join("\n");
+  const twoSrc = (rating.require_two_sources_for || []).join("\n");
   const os = S.oneshot || {};
   return `
     <h1>控制与配置</h1>
@@ -377,7 +383,7 @@ function viewControl() {
     <div class="kv">
       <div>状态</div><div>${bot.running ? `运行中，pid ${bot.pid}，自 ${fmt.dt(bot.started_ms)}` : (st.alive ? "运行中（不是由本控制台启动的进程）" : "已停止")}</div>
       <div>模式</div><div>${cfg.mode === "live" ? "实盘" : "纸面"}${cfg.mode === "live" && !liveOk ? `<span class="fail">，但缺少 HL_AGENT_KEY / HL_ACCOUNT 环境变量，启动会失败</span>` : ""}</div>
-      <div>环境变量</div><div>HL_AGENT_KEY ${env.HL_AGENT_KEY ? "已设置" : "未设置"} · HL_ACCOUNT ${env.HL_ACCOUNT ? "已设置" : "未设置"} · ANTHROPIC_API_KEY ${env.ANTHROPIC_API_KEY ? "已设置" : "未设置"}</div>
+      <div>环境变量</div><div>OPENNEWS_TOKEN ${env.OPENNEWS_TOKEN ? "已设置" : `<span class="fail">未设置，没有新闻输入</span>`} · HL_AGENT_KEY ${env.HL_AGENT_KEY ? "已设置" : "未设置"} · HL_ACCOUNT ${env.HL_ACCOUNT ? "已设置" : "未设置"}</div>
       <div>解释器</div><div class="quiet">${fmt.esc(bot.python || "")}</div>
       <div>仓库</div><div class="quiet">${fmt.esc(bot.repo || "")}</div>
     </div>
@@ -391,7 +397,7 @@ function viewControl() {
     <h2>回放样本</h2>
     <div class="bar">
       <button class="act" id="btnReplay" ${bot.running || (os.running) ? "disabled" : ""}>回放 data/replay.jsonl，15 秒</button>
-      <span class="note">${bot.running ? "先停止 bot，回放和 bot 写同一个数据库。" : "14 条历史标题过一遍完整管线，用当前真实价格做纸面成交。"}</span>
+      <span class="note">${bot.running ? "先停止 bot，回放和 bot 写同一个数据库。" : "一组带 NewsLiquid 真实评分的记录（2026-10-28 免费热榜快照）过一遍完整管线，用当前真实价格做纸面成交。"}</span>
     </div>
     ${os.kind ? `<div class="log" id="oneshotOut">${fmt.esc((os.output || "").split("\n").slice(-40).join("\n"))}</div>` : ""}
 
@@ -401,21 +407,22 @@ function viewControl() {
       <label>日亏熔断 % <input type="number" step="0.5" min="0.5" max="20" id="qDay" value="${acct.daily_loss_limit_pct ?? ""}"></label>
       <label>最多持仓 <input type="number" step="1" min="1" max="10" id="qOpen" value="${acct.max_open_positions ?? ""}"></label>
       <label>总杠杆上限 <input type="number" step="0.5" min="1" max="10" id="qGross" value="${acct.max_gross_leverage ?? ""}"></label>
-      <label><input type="checkbox" id="qLlm" ${llm.enabled ? "checked" : ""}> 启用 LLM 慢车道</label>
+      <label title="低于此分的 NewsLiquid 评分只记录，不产生方向">NewsLiquid 最低分 <input type="number" step="1" min="0" max="100" id="qMinScore" value="${rating.min_score ?? ""}"></label>
+      <label title="auto：先连 WebSocket（Max 套餐），不可用时自动改 REST 轮询">NewsLiquid 传输 <select id="qTransport">${["auto", "ws", "rest"].map(v => `<option value="${v}" ${tp === v ? "selected" : ""}>${v}</option>`).join("")}</select></label>
       <label>模式 <select id="qMode"><option value="paper" ${cfg.mode !== "live" ? "selected" : ""}>纸面</option><option value="live" ${cfg.mode === "live" ? "selected" : ""} ${liveOk ? "" : "disabled"}>实盘${liveOk ? "" : "（缺少环境变量）"}</option></select></label>
       <button class="act" id="qSave">保存常用参数</button>
       <span class="note" id="qMsg"></span>
     </div>
 
     <h2>事件模板</h2>
-    <p class="quiet">改完按保存。持有时间单位秒；止损/止盈/风险是百分比；置信门槛 0–1。</p>
+    <p class="quiet">改完按保存。持有时间单位秒；止损/止盈/风险是百分比；门槛 0–1，NewsLiquid 类就是评分 / 100（0.8 = 80 分）。</p>
     ${templateTable()}
     <div class="bar" style="margin-top:10px"><button class="act" id="tmplSave">保存模板</button><span class="note" id="tmplMsg"></span></div>
 
-    <h2>可信账号</h2>
-    <p class="quiet">一行一个推特账号名。加入意味着：该账号的规则命中置信升到 0.80，且免二源佐证。只加从不发假消息的账号。</p>
-    <textarea id="trusted" rows="8">${fmt.esc(trusted)}</textarea>
-    <div class="bar" style="margin-top:8px"><button class="act" id="trustedSave">保存可信账号</button><span class="note" id="trustedMsg"></span></div>
+    <h2>需要二源佐证的来源</h2>
+    <p class="quiet">一行一个 NewsLiquid 来源名（newsType，不分大小写），比如 twitter、telegram。这些来源的单条新闻不会单独开仓，要等另一个来源在佐证窗口内给出同一币种、同一方向的信号。</p>
+    <textarea id="twoSrc" rows="7">${fmt.esc(twoSrc)}</textarea>
+    <div class="bar" style="margin-top:8px"><button class="act" id="twoSrcSave">保存来源名单</button><span class="note" id="twoSrcMsg"></span></div>
 
     <h2>完整 config.yaml</h2>
     <textarea id="cfgText" rows="22">${fmt.esc(S.cfgText || "")}</textarea>
@@ -479,7 +486,7 @@ function bind() {
   on("#btnStop", "click", async () => { const b = $("#btnStop"); b.disabled = true; b.textContent = "正在平仓并停止…"; await api("/api/bot/stop", {}); setTimeout(() => { refreshState(); refreshView(); }, 500); });
   on("#btnReplay", "click", async () => { const r = await api("/api/replay", { duration: 15 }); if (r.error) alert(r.error); setTimeout(refreshView, 1000); });
   on("#qSave", "click", async () => {
-    const patch = { "account.max_risk_per_trade_pct": Number($("#qRisk").value), "account.daily_loss_limit_pct": Number($("#qDay").value), "account.max_open_positions": Number($("#qOpen").value), "account.max_gross_leverage": Number($("#qGross").value), "classifier.llm.enabled": $("#qLlm").checked, "mode": $("#qMode").value };
+    const patch = { "account.max_risk_per_trade_pct": Number($("#qRisk").value), "account.daily_loss_limit_pct": Number($("#qDay").value), "account.max_open_positions": Number($("#qOpen").value), "account.max_gross_leverage": Number($("#qGross").value), "rating.min_score": Number($("#qMinScore").value), "feeds.newsliquid.transport": $("#qTransport").value, "mode": $("#qMode").value };
     const r = await api("/api/config/patch", { patch });
     toast("#qMsg", r.ok ? "已保存，下次启动生效。" : `保存失败：${r.error || ("未能写入 " + (r.failed || []).join(", "))}`, r.ok);
     refreshView();
@@ -490,7 +497,7 @@ function bind() {
     if (!Object.keys(patch).length) return toast("#tmplMsg", "没有改动。");
     const r = await api("/api/config/patch", { patch }); toast("#tmplMsg", r.ok ? "已保存，下次启动生效。" : `保存失败：${r.error || (r.failed || []).join(", ")}`, r.ok); if (r.ok) S.tmplEdits = {}; refreshView();
   });
-  on("#trustedSave", "click", async () => { const list = $("#trusted").value.split("\n").map(s => s.trim().replace(/^@/, "")).filter(Boolean); const r = await api("/api/config/patch", { patch: { "classifier.rules.trusted_accounts": list } }); toast("#trustedMsg", r.ok ? `已保存 ${list.length} 个账号，下次启动生效。` : `保存失败：${r.error || ""}`, r.ok); });
+  on("#twoSrcSave", "click", async () => { const list = $("#twoSrc").value.split("\n").map(s => s.trim().toLowerCase()).filter(Boolean); const r = await api("/api/config/patch", { patch: { "rating.require_two_sources_for": list } }); toast("#twoSrcMsg", r.ok ? `已保存 ${list.length} 个来源，下次启动生效。` : `保存失败：${r.error || ""}`, r.ok); });
   on("#cfgSave", "click", async () => { const r = await api("/api/config/text", { text: $("#cfgText").value }); toast("#cfgMsg", r.ok ? "已保存，下次启动生效。旧文件在 config.yaml.bak。" : `未保存：${r.error}`, r.ok); if (r.ok) refreshView(); });
   on("#logGrep", "input", e => { S.logGrep = e.target.value; refreshLog(); });
   on("#logAuto", "click", () => { S.logAuto = !S.logAuto; $("#logAuto").classList.toggle("on", S.logAuto); });

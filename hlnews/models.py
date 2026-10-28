@@ -9,24 +9,18 @@ from typing import Any
 
 
 class EventClass(str, Enum):
-    MACRO_CPI = "macro_cpi"
+    # first-party data lanes (the bot reads the primary source itself; the judgment is arithmetic, not text)
+    MACRO_CPI = "macro_cpi"          # BLS release page vs ForexFactory consensus
     MACRO_NFP = "macro_nfp"
-    MACRO_FOMC = "macro_fomc"
-    LISTING_BINANCE = "listing_binance"
-    LISTING_UPBIT = "listing_upbit"
-    LISTING_COINBASE = "listing_coinbase"
-    LISTING_HL = "listing_hl"
-    HACK = "hack_exploit"
-    DEPEG = "depeg"
-    ETF = "etf"
-    REGULATORY = "regulatory"
-    TARIFF = "tariff"
-    TRUMP = "trump_policy"
-    EARNINGS = "earnings"
-    GUIDANCE = "guidance"
-    MNA = "m_and_a"
-    SUPPLY_EXPANSION = "supply_expansion"   # a maker adds capacity -> bearish for its tradeable peers
-    SUPPLY_CUT = "supply_cut"               # a maker cuts output / plant outage -> bullish for peers
+    LISTING_HL = "listing_hl"        # Hyperliquid meta diff: a new perp appeared
+    # NewsLiquid lanes: one class per NewsLiquid engineType; direction and score come from NewsLiquid's AI rating
+    NL_NEWS = "nl_news"              # engineType "news", crypto tickers
+    NL_NEWS_STOCK = "nl_news_stock"  # engineType "news", trade.xyz stock perps (xyz:*) -- separate template
+    NL_LISTING = "nl_listing"        # engineType "listing" (Binance, Coinbase, OKX, Bybit, Upbit, Bithumb, ...)
+    NL_ONCHAIN = "nl_onchain"
+    NL_MARKET = "nl_market"
+    NL_MEME = "nl_meme"
+    NL_PREDICTION = "nl_prediction"
     NOISE = "noise"
 
 
@@ -54,15 +48,15 @@ def new_id(prefix: str) -> str:
 @dataclass
 class NewsItem:
     id: str
-    source: str                 # feed: treeofalpha / telegram / hl_listings / replay
-    channel: str                # sub-source: Twitter / Blogs / Binance EN / Upbit / @BWEnews ...
+    source: str                 # feed: newsliquid / hl_listings / bls_poll / replay
+    channel: str                # sub-source: NewsLiquid newsType (Bloomberg, Twitter, jin10, Binance ...), meta_diff, usGov
     title: str
     url: str
     ts_ms: int                  # origin timestamp as reported by the feed
     recv_ms: int                # when this process received it
-    account: str | None = None  # twitter handle, telegram channel, blog name
-    suggestions: list[str] = field(default_factory=list)  # coins suggested by the feed
-    raw: dict[str, Any] = field(default_factory=dict)
+    account: str | None = None  # publisher / account when the feed reports one
+    suggestions: list[str] = field(default_factory=list)  # coins tagged by the feed (NewsLiquid coins[].symbol)
+    raw: dict[str, Any] = field(default_factory=dict)     # NewsLiquid items carry their normalized rating in raw["nl"]
 
     @property
     def age_s(self) -> float:
@@ -71,7 +65,7 @@ class NewsItem:
 
 @dataclass
 class Classification:
-    lane: str                   # "rules" | "llm"
+    lane: str                   # "newsliquid" | "macro" | "hl_listing"
     event_class: EventClass
     direction: Direction
     confidence: float           # 0..1
@@ -81,6 +75,9 @@ class Classification:
     is_scheduled: bool = False
     magnitude_usd: float | None = None
     latency_ms: int = 0
+    # NewsLiquid rates each tagged coin separately: {"BTC": {"direction": "long", "confidence": 0.85, "source": "coin"}}.
+    # When present, the engine opens each coin with its own direction / confidence instead of the headline verdict.
+    per_ticker: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass

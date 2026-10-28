@@ -1,8 +1,8 @@
 # hl-news-bot
 
-> 一个在 Hyperliquid 永续合约上做新闻事件交易的 Python bot。接免费新闻流，用规则 + 可选 LLM 把标题翻译成"事件类 / 方向 / 置信度 / 标的"，过风控闸后按事件模板开仓，止损挂在交易所、止盈和时间止损在本地。默认 **paper 模式**：真实新闻、真实价格、模拟成交，不碰钱。
+> 一个在 Hyperliquid 永续合约上做新闻事件交易的 Python bot。新闻的采集和判断交给 **NewsLiquid**（6551 OpenNews）：它聚合约 85 个来源，给每条新闻打 0–100 的 AI 影响分和多空方向，并对每个相关币种单独打分；bot 不读标题，只按评分、来源策略和事件模板决定开不开仓。定时宏观数据（BLS 的 CPI、非农）和 Hyperliquid 新上币仍由 bot 自己从一手源直采。过风控闸后按模板开仓，止损挂在交易所、止盈和时间止损在本地。默认 **paper 模式**：真实新闻、真实价格、模拟成交，不碰钱。
 
-这份 README 分两部分。**第一部分是运行手册**：每一条新闻进来之后发生了什么、为什么是这样设计、哪个参数管哪件事、出了问题去哪看。**第二部分是架构设计与可行性结论**：延迟预算、实证数据、事件模板的来源、最小资金、以及对"200% 年化"这个问题的数学回答。第二部分同时以独立文件保存在 [`docs/HL-news-bot-design.md`](docs/HL-news-bot-design.md)。
+这份 README 分两部分。**第一部分是运行手册**：每一条新闻进来之后发生了什么、为什么是这样设计、哪个参数管哪件事、出了问题去哪看。**第二部分是 2026-10-01 的架构设计与可行性结论**：延迟预算、实证数据、事件模板的来源、最小资金、以及对"200% 年化"这个问题的数学回答；其中信息层（自建爬虫 + 规则/LLM 分类）已在 2026-10-28 被 NewsLiquid 取代，见第 15 节。第二部分同时以独立文件保存在 [`docs/HL-news-bot-design.md`](docs/HL-news-bot-design.md)。
 
 ---
 
@@ -15,10 +15,10 @@
 3. [一条新闻的完整生命周期](#3-一条新闻的完整生命周期)
 4. [模块逐个讲](#4-模块逐个讲)
    - 4.1 [models.py：五个数据类型](#41-modelspy五个数据类型)
-   - 4.2 [feeds.py：新闻从哪来](#42-feedspy新闻从哪来)
+   - 4.2 [newsliquid.py 与 feeds.py：新闻从哪来](#42-newsliquidpy-与-feedspy新闻从哪来)
    - 4.3 [macro.py：定时宏观数据的直采](#43-macropy定时宏观数据的直采)
-   - 4.4 [classify.py：双车道分类器](#44-classifypy双车道分类器)
-   - 4.5 [engine.py：主循环、去重、佐证、融合、持仓管理](#45-enginepy主循环去重佐证融合持仓管理)
+   - 4.4 [classify.py：评分到判断](#44-classifypy评分到判断)
+   - 4.5 [engine.py：主循环、去重、门槛、二源佐证、持仓管理](#45-enginepy主循环去重门槛二源佐证持仓管理)
    - 4.6 [risk.py：风控闸与仓位计算](#46-riskpy风控闸与仓位计算)
    - 4.7 [hl.py：行情、滑点估计、paper 与 live 执行](#47-hlpy行情滑点估计paper-与-live-执行)
    - 4.8 [store.py：SQLite 里有什么](#48-storepysqlite-里有什么)
@@ -26,17 +26,15 @@
    - 4.10 [run.py：入口与命令行](#410-runpy入口与命令行)
 5. [config.yaml 逐项解释](#5-configyaml-逐项解释)
 6. [事件模板：每一类为什么是这些数字](#6-事件模板每一类为什么是这些数字)
-7. [并发模型：五个协程怎么协作](#7-并发模型五个协程怎么协作)
+7. [并发模型：几个协程怎么协作](#7-并发模型几个协程怎么协作)
 8. [日志怎么读、数据库怎么查](#8-日志怎么读数据库怎么查)
 9. [从 paper 到 live 的三道门](#9-从-paper-到-live-的三道门)
 10. [Hyperliquid 的几个坑，以及代码里对应的处理](#10-hyperliquid-的几个坑以及代码里对应的处理)
-11. [怎么改：加新闻源、加事件类、改模板、接 LLM](#11-怎么改加新闻源加事件类改模板接-llm)
+11. [怎么改：调门槛、改来源、加模板、加一手数据源](#11-怎么改调门槛改来源加模板加一手数据源)
 12. [已知限制与未做的事](#12-已知限制与未做的事)
 13. [常见问题](#13-常见问题)
 14. [可视化控制台与 macOS 客户端](#14-可视化控制台与-macos-客户端)
-15. [行业供给车道与关键新闻报警：东芝 HDD 案例](#15-行业供给车道与关键新闻报警东芝-hdd-案例)
-16. [金十数据：接口现状与接入](#16-金十数据接口现状与接入)
-17. [财联社接入与轮询分层（热窗口）](#17-财联社接入与轮询分层热窗口)
+15. [NewsLiquid：接入、套餐与额度、迁移说明](#15-newsliquid接入套餐与额度迁移说明)
 
 **第二部分：架构设计与可行性结论**
 
@@ -61,18 +59,20 @@
 
 先把前提讲清楚，否则后面每个设计决定都像是随手拍的。
 
-**免费新闻源的延迟是 0.5–30 秒。** Tree of Alpha 的免费 WebSocket 对推特的中位延迟是 0.56 秒，这已经是免费档里最快的。而 CPI 这种定时数据，发布后 15 秒内价格已经走完 5 分钟行情的 85–90%。所以这套系统**不可能**抢到"第一跳"。它能做的是：
+**新闻怎么来、谁来判断。** 2026-10-28 起，新闻的采集和判断都交给 NewsLiquid（6551 OpenNews）。它聚合约 85 个来源（Bloomberg、Reuters、金十、BWEnews、推特 KOL、Truth Social、九家交易所的上币公告等），每条新闻带一个 0–100 的 AI 影响分和方向（long / short / neutral），并对新闻涉及的每个币种单独打分。bot 不再读标题，只做三件事：把 NewsLiquid 标出的币种映射成 Hyperliquid 合约；按事件模板的门槛和来源策略决定开不开；执行和风控。之前自建的六个爬虫（Tree of Alpha、Telegram、Google News、华尔街见闻、金十、财联社）和规则 / LLM 双车道分类器已删除，取舍见第 15 节。
 
-- **定时宏观数据的残余行情。** CPI 发布后 1 分钟已走完 30 分钟行情的 76%，但剩下的 24% 在 83% 的情况下和第一分钟方向一致。代码直接轮询 bls.gov 拿数字（1–3 秒），比等中继快。
-- **非计划冲击的延续。** Bybit 被盗、特朗普发帖、关税升级这类事件，价格的第一个极值通常在发帖后 2–5 分钟才出现，免费延迟够用。但反转是常态（假 SEC 推文 15 分钟内走完来回），所以每笔都有硬性时间止损。
+**这套系统抢不到"第一跳"。** CPI 这种定时数据，发布后 15 秒内价格已经走完 5 分钟行情的 85–90%；新闻经过 NewsLiquid 的采集和 AI 评分再到本机，又要几秒到几十秒（没有 Max 套餐时走 REST 轮询，默认每 15 秒一次）。它能做的是：
+
+- **定时宏观数据的残余行情。** CPI 发布后 1 分钟已走完 30 分钟行情的 76%，但剩下的 24% 在 83% 的情况下和第一分钟方向一致。代码直接轮询 bls.gov 拿数字（1–3 秒），这条路不经过 NewsLiquid。
+- **非计划冲击的延续。** Bybit 被盗、特朗普发帖、关税升级这类事件，价格的第一个极值通常在发帖后 2–5 分钟才出现，几秒到几十秒的延迟够用。但反转是常态（假 SEC 推文 15 分钟内走完来回），所以每笔都有硬性时间止损，推特这类单一来源的消息还要等第二个来源。
 - **Hyperliquid 自己的新上币。** 通过 `meta` 接口 diff 发现，零延迟，和所有人同时知道。
 - **美股财报后漂移。** 不赌前 10 秒（学术证据说那里没边际），赌 2 小时内的方向延续。
 
-**明确不做的：** 币安/Upbit 上币抢跑（付费同机房的人用毫秒级接入，你用秒级接入是去送钱）、任何毫秒级操作（Hyperliquid 自己在 BTC/ETH 价格发现上落后 Binance 约 800 毫秒）、财报前 10 秒。
+**明确不做的：** 币安 / Upbit 上币抢跑（付费同机房的人用毫秒级接入，你用秒级接入是去送钱）、任何毫秒级操作（Hyperliquid 自己在 BTC/ETH 价格发现上落后 Binance 约 800 毫秒）、财报前 10 秒。
 
-**宁可漏不可错。** 整个分类器的设计偏向是：规则置信度门槛高、需要二源佐证、谣言词直接拦、辟谣反转。实测过去一周 2,597 条真实新闻，规则车道 0 条直接触发下单、49 条进入待复核。这不是 bug，是设计目标；精度要靠 paper 期间人工复核 `decisions` 表来积累。
+**宁可漏不可错。** 默认门槛是 NewsLiquid 评分 80 分（`templates.nl_news.min_conf: 0.8`）。2026-10-28 的免费热榜（三个类别各取 24 小时内最热的 50 条，去重后 118 条）里，66 条带有本 universe 的币种，news 引擎里到 80 分的只有 1 条，而那 1 条是讲伊朗局势和原油的，同时标了六个资产却没有逐币评分，bot 不会把它当成 BTC 的做多信号（第 4.4 节）。推特、Telegram、微博等来源的单条消息即使分数够，也要等另一个来源同向确认。这不是 bug，是设计目标：先在 paper 里攒"评分 vs 之后的价格"，再决定门槛该不该放低。
 
-**关于收益预期。** 第二部分 B8、B9 节有完整的数学。简单说：200% 年化需要 1.5 倍盈亏比下 ≥50% 的胜率加每年 250 次机会，这套模板一年大约 60–120 个高置信信号，用理想分类回测 CPI 的每笔期望只有止损距离的 1/8。请把它当成一个研究工具和执行框架，而不是印钞机。
+**关于收益预期。** 第二部分 B8、B9 节有完整的数学。简单说：200% 年化需要 1.5 倍盈亏比下 ≥50% 的胜率加每年 250 次机会。NewsLiquid 评分作为方向判断有多准，目前没有独立验证（它公布的准确率是自报的），所以 paper 阶段的首要任务就是测这个。请把这套系统当成一个研究工具和执行框架，而不是印钞机。
 
 ---
 
@@ -89,7 +89,17 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-`requirements.txt` 只有三个硬依赖：`hyperliquid-python-sdk`（官方 SDK）、`websockets`、`pyyaml`。Telegram 源需要 `telethon`，LLM 车道需要 `anthropic` 或 `openai`，都是可选。
+`requirements.txt` 只有三个硬依赖：`hyperliquid-python-sdk`（官方 SDK）、`websockets`、`pyyaml`。跑测试另需 `pytest`。
+
+### 第零步：NewsLiquid token
+
+在 https://6551.io/mcp（或 app.newsliquid.com/mcp）注册拿 token，放进环境变量：
+
+```bash
+export OPENNEWS_TOKEN=...   # 或写进仓库根的 .env（已在 .gitignore 里，模板见 .env.example）
+```
+
+免费账号每天 100 条额度，只够验证接口；持续运行要买额度，第 15 节有按套餐的配置。回放和测试不需要 token。
 
 ### 第一步：回放
 
@@ -97,23 +107,20 @@ pip install -r requirements.txt
 python -m hlnews.run --replay data/replay.jsonl --duration 15
 ```
 
-这会把 `data/replay.jsonl` 里 14 条历史标题（Bybit 被盗、特朗普储备帖、假 SEC 推文 + 辟谣、CPI 偏热、MU 财报、谣言、噪音）灌进完整管线。你会看到类似：
+`data/replay.jsonl` 的前 12 行是 2026-10-28 从 NewsLiquid 免费热榜接口取下的**真实条目和真实评分**（SK 海力士财报、英伟达投资 Meta、伊朗局势、比特币 ETF 流入等）；第 13 行是一条手写的**示例**，形状和实时推送一样、带逐币评分（BTC 看多 84、ETH 看空 55），文本里标着 `[EXAMPLE - not real news]`；最后两行是一条示例 BLS 数据（偏热的 CPI）和一条没有评分的普通标题。你会看到类似：
 
 ```
-INFO hl: HL client ready mode=paper dexs=['', 'xyz'] coins=363
-INFO engine: OPEN PAPER short ETH size=0.39690 @ 2686.9000 notional=$1066 (0.53x equity, margin lev 3x) stop=2727.2542 tp=2619.7762 hold=5400s news_age=675.8s slip=0.2bps
-INFO engine: REJECT hack_exploit short ETH: confidence 0.60 < 0.8
-INFO engine: REJECT hack_exploit short ETH: per-coin cooldown ETH
-INFO engine: waiting for corroboration (1 source) trump_policy BTC: Donald J. Trump (@realDonaldTrump): A U.S. Crypto Reserve will elevate...
-INFO engine: REJECT etf long BTC: confidence 0.80 < 0.85
-INFO engine: OPEN PAPER long xyz:MU size=0.57200 @ 1048.5000 notional=$600 (0.30x equity, margin lev 3x) ...
-INFO engine: REJECT earnings short xyz:TSLA: max open positions
-INFO engine: rumor, skip: random (@randomguy): rumour: Coinbase about to be hacked? unconfirmed, sources say
+INFO hl: HL client ready mode=paper dexs=['', 'xyz'] coins=375
+INFO alerts: ALERT [key_news] nl_news BTC long 84 | [EXAMPLE - not real news] Shape of a live news.ai_update ...
+INFO engine: OPEN PAPER long BTC size=0.00828 @ 80506.6992 notional=$667 (0.33x equity, margin lev 2x) stop=79292.9925 tp=82513.0125 hold=3600s news_age=285190.4s slip=0.8bps
+INFO engine: REJECT macro_cpi short BTC: per-coin cooldown BTC
+INFO engine: OPEN PAPER short ETH size=0.53610 @ 2331.6000 notional=$1250 (0.62x equity, margin lev 3x) stop=2349.9000 tp=2303.2750 hold=1800s news_age=285131.8s slip=0.2bps
 WARNING engine: flattening 2 open positions
-INFO engine: CLOSE PAPER short ETH @ 2686.6000 reason=shutdown pnl=$-0.84 fees=$0.96 equity=$1999.16
+INFO engine: CLOSE PAPER long BTC @ 80502.0000 reason=shutdown pnl=$-0.64 fees=$0.60 equity=$1999.36
+INFO engine: CLOSE PAPER short ETH @ 2331.7000 reason=shutdown pnl=$-1.18 fees=$1.12 equity=$1998.18
 ```
 
-每一行的含义第 8 节会逐字解释。注意价格是**实时的** Hyperliquid 价格，回放只是替换了新闻源。15 秒后进程自动退出并打印汇总 JSON。
+12 条真实条目一条都没交易：82 分的伊朗条目同时标了原油、BTC、ETH 等六个资产且没有逐币评分，不套到 BTC 上；另一条 82 分来自 `meme` 引擎（推特），没有交易模板；78 分、72 分的停在 80 分门槛下面，但判断照样落库，控制台里能看到；同一个 Datavault 新闻的两个版本被去重。示例条目开了 BTC 多单（ETH 的 55 分低于最低分 60，不给方向）；CPI 偏热的做空在 BTC 上被同币冷却拒掉，在 ETH 上开了空单。每一行的含义第 8 节会逐字解释。注意价格是**实时的** Hyperliquid 价格，回放只是替换了新闻源。15 秒后进程自动退出并打印汇总 JSON。
 
 ### 第二步：paper 实盘
 
@@ -121,7 +128,7 @@ INFO engine: CLOSE PAPER short ETH @ 2686.6000 reason=shutdown pnl=$-0.84 fees=$
 python -m hlnews.run
 ```
 
-接三个真实源：Tree of Alpha WebSocket、Hyperliquid 新上币探测、BLS 宏观数据定时轮询。按 Ctrl-C 退出时会先平掉所有 paper 持仓。大部分时间它什么都不做，这是正常的。
+接三路真实源：NewsLiquid（有 Max 套餐时走 WebSocket 推送，否则 REST 每 15 秒轮询一次）、Hyperliquid 新上币探测、BLS 宏观数据定时轮询。没有设 `OPENNEWS_TOKEN` 时 NewsLiquid 源会报 `auth_fail` 并停下，另外两路照常。按 Ctrl-C 退出时会先平掉所有 paper 持仓。大部分时间它什么都不做，这是正常的。
 
 ### 第三步：看结果
 
@@ -138,77 +145,79 @@ python -m hlnews.backtest --events data/events.jsonl --delay 20
 python -m hlnews.backtest --events data/events.jsonl --sweep
 ```
 
-用 Binance 1 分钟 K 线对 45 个历史事件跑模板，`--sweep` 扫描入场延迟 5/20/60/180/300 秒。注意它的用途是测模板参数对延迟的敏感性；方向是事后给定的，所以**不能**用它估计胜率。
+用 Binance 1 分钟 K 线对 45 个历史事件跑模板，`--sweep` 扫描入场延迟 5/20/60/180/300 秒。事件文件里的 `event_class` 是历史标签（hack_exploit、etf、tariff 等来自旧的规则车道），没有对应模板时按今天的 NewsLiquid 模板模拟：加密币用 `nl_news`，股票永续用 `nl_news_stock`，结果仍按历史标签分组。它的用途是测模板参数对延迟的敏感性；方向是事后给定的，所以**不能**用它估计胜率。
+
+### 测试
+
+```bash
+pip install pytest
+python -m pytest -q tests
+```
+
+37 个测试，不连外网：Hyperliquid 用假客户端，NewsLiquid 用假 REST 和本地 WebSocket 服务器。覆盖三种条目形状的解析、REST 轮询、WS 推送、握手被拒时改走 REST、断线补漏、"静默 WS"检测、突发分页、评分到信号的映射、二源佐证、回测模板回退，以及上面那份回放的完整结果。
 
 ---
 
 ## 3. 一条新闻的完整生命周期
 
-用一个真实案例走一遍：2025-02-21 15:20 UTC，ZachXBT 发推说 Bybit 有 14.6 亿美元可疑流出。
+用回放里那条示例走一遍实时路径（Max 套餐，WebSocket 推送）。它的形状和 NewsLiquid 文档里的 `news.ai_update` 一样：整条 84 分看多，BTC 84 分看多，ETH 55 分看空。
 
 ```mermaid
 sequenceDiagram
-    participant TOA as Tree of Alpha WS
-    participant F as feeds.parse_toa
+    participant NL as NewsLiquid WS
+    participant F as newsliquid_feed
     participant Q as asyncio.Queue
     participant E as Engine.handle
-    participant C as classify_rules
+    participant C as classify_newsliquid
     participant R as RiskGate.check
     participant H as HLClient
     participant DB as SQLite
 
-    TOA->>F: {"title":"ZachXBT (@zachxbt)","body":"Bybit ... $1.46B suspicious outflows","info":{"twitterId":...},"time":1740151200560}
-    F->>F: 拼 title+body，提取 account=zachxbt，suggestions=[ETH]
-    F->>Q: NewsItem(source=treeofalpha, channel=Twitter, age_s=0.6)
+    NL->>F: news.update {id, text, newsType:"Reuters", engineType:"news", coins:[BTC, ETH]}（还没评分）
+    F->>F: 记下首次看到的时间，等评分
+    NL->>F: news.ai_update {…, coins:[BTC 84 long, ETH 55 short], aiRating:{score:84, signal:"long"}}
+    F->>Q: NewsItem(source=newsliquid, channel=Reuters, raw.nl=条目与评分)
     Q->>E: handle(item)
     E->>DB: INSERT news
-    E->>E: age_s 0.6 < 20 ✓ 不是重复 ✓ 不在维护窗口 ✓
-    E->>C: classify_rules(item, ctx)
-    C->>C: trusted=True (zachxbt 在白名单)<br/>匹配 "suspicious outflows"<br/>金额 $1.46B ≥ $100M，涉及 bybit<br/>非跟进报道
-    C-->>E: HACK / SHORT / 0.80 / [ETH]
+    E->>E: 时效 ✓ 不是重复 ✓ 不在维护窗口 ✓
+    E->>C: classify(item, ctx)
+    C->>C: engineType news → nl_news<br/>标签 BTC→BTC，ETH→ETH<br/>逐币评分：BTC long 84；ETH 55 < 最低分 60 → 无方向
+    C-->>E: NL_NEWS / LONG / 0.84 / [BTC]
     E->>DB: INSERT classifications
-    E->>E: LLM 未启用，final = rules<br/>不是谣言 ✓ 有模板 ✓
-    E->>E: Corroboration.add → 1 个来源<br/>hack_exploit 在 require_two 里，但 trusted=True → 放行
+    E->>E: BTC：模板 nl_news ✓ 新鲜度 ✓ 0.84 ≥ 0.80 ✓<br/>Reuters 不在二源名单 ✓
     E->>DB: INSERT signals
-    E->>H: l2_slippage_bps(ETH, ~$1067, sell)
-    H-->>E: 0.2 bps
-    E->>R: check(sig, mid=2686.9, state, slip=0.2, fee=0.045%)
-    R->>R: 未熔断 ✓ 置信 0.80 ≥ 0.80 ✓ 日亏 0% ✓<br/>无冷却 ✓ 持仓 0 < 2 ✓<br/>成本 0.094% < 35%×1.5% ✓<br/>名义 = 2000×0.8%/1.5% = $1067
-    R-->>E: accepted, size=0.397, stop=+1.5%, tp=-2.5%, hold=90min
+    E->>E: 模板 alert: true → key_news 报警
+    E->>H: l2_slippage_bps(BTC, ~$667, buy)
+    H-->>E: 0.8 bps
+    E->>R: check(sig, mid, state, slip, fee=0.045%)
+    R-->>E: accepted, stop −1.5%, tp +2.5%, hold 60 min
     E->>DB: INSERT decisions (accepted)
-    E->>H: open_position (paper: mid − 0.2bps，扣 0.045% 费)
-    H-->>E: entry=2686.9, fee=$0.48
+    E->>H: open_position（paper：按盘口算成交价，扣 0.045% 费）
     E->>DB: INSERT positions
     Note over E: 每秒检查 mid vs stop/tp/time_exit
-    E->>H: close_position(reason)
-    E->>DB: UPDATE positions (exit, pnl)
 ```
 
 逐步说明：
 
-1. **采集**（`feeds.py`）。Tree of Alpha 推送的是推特直推格式，`parse_toa` 把 `title`（"ZachXBT (@zachxbt)"）和 `body` 拼成一句话，从括号里抠出账号名，从 `suggestions` 里取出币种建议，记录两个时间：源给的 `time` 和本机的 `recv_ms`，差值就是 `age_s`。
+1. **采集**（`newsliquid.py`）。WebSocket 订阅之后，NewsLiquid 先推 `news.update`（原文，还没评分），评分完成后再推 `news.ai_update`。只有带评分的才进管线。`news.update` 的到达时间记在 `raw.nl_first_seen_ms`，评分到达时间记在 `raw.nl_rated_ms`，差值就是 NewsLiquid 的 AI 评分延迟（第 8 节有查询）。没有 Max 套餐时同样的条目来自 REST 轮询（`POST /open/news_search`），还没评完分的先挂起，下一轮再看。
 
 2. **入队**（`engine._pump`）。所有源共享一个 `asyncio.Queue`，上限 1 万条，满了就丢并报错。
 
-3. **三道前置过滤**（`engine.handle` 开头）。先落库，然后：超过 20 秒的旧消息丢掉（防止 WS 重连后补发旧闻触发交易）；12 词指纹在 10 分钟内见过的丢掉（同一条新闻会从推特、博客、Telegram 以 3–8 个版本到达）；周五维护窗口内不开新仓。
+3. **三道前置过滤**（`engine.handle` 开头）。先落库，然后：超过 `feeds.max_age_by_source.newsliquid`（30 分钟）的旧消息丢掉；12 词指纹在 10 分钟内见过的丢掉（同一事件常有 Bloomberg、Reuters、推特几个版本，NewsLiquid 给的 id 各不相同）；周五维护窗口内不开新仓。
 
-4. **规则车道**（`classify_rules`）。一串 `if` 按优先级匹配：先看是不是辟谣措辞，再依次查 CPI、NFP、FOMC、HL 上币、交易所上币、黑客/脱锚、ETF/监管、关税/特朗普、财报/指引/并购。这条新闻命中"suspicious outflows"，金额解析出 1.46e9，涉及 bybit。`zachxbt` 在可信名单里，所以置信 0.80 而不是 0.60。整个函数耗时 <1 毫秒。
+4. **评分 → 判断**（`classify_newsliquid`）。不读正文。`engineType` 决定事件类（news → `nl_news`，listing → `nl_listing`……）；币种标签按精确规则映射成 HL 合约；有逐币评分时每个币用自己的方向和分数，82 分 → 0.82 这样直接换算。低于 `rating.min_score`（60）的不给方向，ETH 的 55 分就是这样。耗时 <1 毫秒。
 
-5. **LLM 车道**（可选）。默认关闭。开启时，只有规则给出"噪音 / 无方向 / 置信 <0.8"才调用，和一次行情刷新并发执行，然后走 `_fuse` 融合。
+5. **逐币决策**（`engine.handle` 里的循环）。股票永续的 news 条目换用 `nl_news_stock` 模板；然后依次检查：有没有模板、新闻是否超过模板的 `max_news_age_s`、分数是否过模板门槛 `min_conf`、来源是否在二源名单里。
 
-6. **后置过滤**。噪音、无方向、无标的、谣言、无模板的直接返回。
+6. **二源佐证**（`Corroboration`）。`rating.require_two_sources_for` 里的来源（twitter、telegram、weibo 等）单独一条不开仓，要等另一个来源在窗口内给出同一（事件类, 币, 方向）且同样过了门槛。这条来自 Reuters，不在名单里，直接放行。
 
-7. **二源佐证**（`Corroboration`）。`hack_exploit` 在 `require_two_sources_for` 里，意思是非可信来源需要 90 秒内有第二个独立来源报同一（事件类, 币, 方向）。ZachXBT 是可信账号，直接放行。如果首发是个不知名账号，这里会打印 `waiting for corroboration (1 source)` 然后等。
+7. **信号落库 + 报警 + 执行**（`_execute`）。模板带 `alert: true` 的先推一条 key_news 报警（同一事件 6 小时只推一次），然后检查价格新鲜度（15 秒内），拉一次盘口估算这笔名义的滑点，再把全部信息交给风控闸。
 
-8. **信号落库 + 执行**（`_execute`）。先检查价格是否新鲜（15 秒内），然后拉一次盘口估算这笔名义的滑点，再把全部信息交给风控闸。
+8. **风控闸**（`RiskGate.check`）。11 道检查按顺序执行，任何一道不过就返回拒绝原因并落库。都过了就算仓位：风险预算 = 权益 × 0.5% = $10；止损距离 1.5%；名义 = $10 / 1.5% = $667。然后被四个上限封顶（单笔名义 $4,000、模板杠杆 2x、币种最大杠杆、总杠杆 3x）。
 
-9. **风控闸**（`RiskGate.check`）。11 道检查按顺序执行，任何一道不过就返回拒绝原因并落库。都过了就算仓位：风险预算 = 权益 × 0.8% = $16；止损距离 1.5%；名义 = $16 / 1.5% = $1,067。然后被四个上限封顶（单笔名义 $4,000、模板杠杆 3x、币种最大杠杆 25x、总杠杆 3x）。
+9. **开仓**（`HLClient.open_position`）。paper 模式按盘口逐档吃单算成交价（这里 0.8 bps），扣 0.045% 吃单费。live 模式发 IOC 限价单（mid ± 0.3%），成交后立刻挂一张 reduce-only 的触发止损单在交易所。
 
-10. **开仓**（`HLClient.open_position`）。paper 模式按盘口逐档吃单算成交价（这里 0.2 bps），扣 0.045% 吃单费。live 模式发 IOC 限价单（mid ± 0.3%），成交后立刻挂一张 reduce-only 的触发止损单在交易所。
-
-11. **持仓管理**（`_manage_positions`）。每秒一次，用最新 mid 检查：碰到止损价 → `stop`；碰到止盈价 → `take_profit`；超过持有时间 → `time_stop`。任一触发就平仓、落库、更新权益、更新亏损冷却、检查日亏熔断。
-
-Bybit 这个案例的真实走势：发帖后 5 分钟 ETH −1.36%，15 分钟 −2.65%，30 分钟 −4.07%。模板止盈 2.5% 会在 15 分钟左右命中。
+10. **持仓管理**（`_manage_positions`）。每秒一次，用最新 mid 检查：碰到止损价 → `stop`；碰到止盈价 → `take_profit`；超过持有时间 → `time_stop`。任一触发就平仓、落库、更新权益、更新亏损冷却、检查日亏熔断。
 
 ---
 
@@ -220,44 +229,43 @@ Bybit 这个案例的真实走势：发帖后 5 分钟 ETH −1.36%，15 分钟 
 
 | 类型 | 谁产生 | 谁消费 | 关键字段 |
 |---|---|---|---|
-| `NewsItem` | feeds / macro | engine | `source`（哪个 feed）、`channel`（feed 内的子来源，如 Twitter/Blogs/usGov）、`account`（推特账号或博客名）、`title`、`ts_ms`（源时间戳）、`recv_ms`（本机接收时间）、`suggestions`（源给的币种提示）、`raw`（原始 JSON） |
-| `Classification` | classify | engine | `lane`（rules/llm/fused）、`event_class`、`direction`、`confidence`、`tickers`（HL 币名列表）、`is_rumor`、`is_scheduled`、`magnitude_usd`、`latency_ms` |
+| `NewsItem` | newsliquid / feeds / macro | engine | `source`（newsliquid / hl_listings / bls_poll / replay）、`channel`（NewsLiquid 的 newsType，如 Bloomberg、Twitter、jin10；或 meta_diff、usGov）、`title`、`ts_ms`（源时间戳）、`recv_ms`（本机接收时间）、`suggestions`（NewsLiquid 标的币种）、`raw`（NewsLiquid 条目在 `raw.nl` 里：原文、引擎、币种标签、评分） |
+| `Classification` | classify | engine | `lane`（newsliquid / macro / hl_listing / none）、`event_class`、`direction`、`confidence`、`tickers`（HL 币名列表）、`per_ticker`（逐币方向和分数）、`is_scheduled`、`latency_ms` |
 | `Signal` | engine | risk / store | 一个（新闻, 币, 方向）组合 + 这一类的 `template` 字典 + `news_age_s` |
 | `Position` | engine → hl | hl / store | 开仓时的 size/entry/stop/tp/time_exit/notional/leverage，平仓时补 exit_px/exit_ms/exit_reason/pnl_usd |
-| `EventClass` / `Direction` | 枚举 | 全部 | 17 个事件类（含 NOISE），3 个方向（LONG/SHORT/NONE） |
+| `EventClass` / `Direction` | 枚举 | 全部 | 11 个事件类：一手数据 3 个（macro_cpi、macro_nfp、listing_hl）、NewsLiquid 7 个（nl_news、nl_news_stock、nl_listing、nl_onchain、nl_market、nl_meme、nl_prediction）、noise；3 个方向（LONG/SHORT/NONE） |
 
 两个小细节：`NewsItem.age_s` 是属性，等于 `(recv_ms − ts_ms)/1000`，负数会被钳到 0；`Position.to_row()` 把枚举转成字符串以便写 SQLite。
 
-### 4.2 feeds.py：新闻从哪来
+### 4.2 newsliquid.py 与 feeds.py：新闻从哪来
 
-每个 feed 都是一个 `async generator`，`yield NewsItem`。引擎对所有 feed 一视同仁，所以加新源只需要再写一个 generator。
+每个源都是一个 `async generator`，`yield NewsItem`。新闻只有一个源：`newsliquid_feed`。
 
-**`treeofalpha_feed`** — 主力源。连 `wss://news.treeofalpha.com/ws`，免费、无需登录。断线按 1→2→4→…→30 秒指数退避重连，加随机抖动。收到的 JSON 交给 `parse_toa`。
+**`newsliquid_feed`**（`hlnews/newsliquid.py`）有三种传输，`feeds.newsliquid.transport` 选：
 
-`parse_toa` 要处理**两种结构**（这是实跑时踩到的坑）：
+| 传输 | 怎么连 | 适合 |
+|---|---|---|
+| `ws` | `wss://ai.6551.io/open/news_wss?token=…`，JSON-RPC 2.0：发 `news.subscribe`（带 `engineTypes` / `coins` / `hasCoin` 过滤），收 `news.update` 和 `news.ai_update`；每 20 秒发文本 `ping`，服务端回 `pong`，60 秒没有任何帧就重连 | Max 套餐（实时推送） |
+| `rest` | `POST https://ai.6551.io/open/news_search`，`Authorization: Bearer`，每 `poll_s` 秒一次，每次调用扣额度 | 其他付费套餐 |
+| `auto`（默认） | 先连 WS；握手被拒（401/402/403）或订阅返回错误就改走 REST，`ws_retry_s`（30 分钟）后再试 WS；WS 断开期间 REST 自动接管 | 不确定套餐时 |
 
-```
-REST 历史接口 / 博客类：
-  {"title": "COINDESK: NEAR Intents hit by $3.8M exploit", "source": "Blogs", "sourceName": "COINDESK",
-   "en": "...", "url": ..., "time": 1790864317104, "symbols": ["NEAR_USDT"], "suggestions": [{"coin": "NEAR", ...}]}
+几个实现细节：
 
-WS 直推（推特 / Truth Social）：
-  {"title": "Donald J. Trump (@realDonaldTrump)", "body": "正文...", "link": "https://truthsocial.com/...",
-   "type": "direct", "info": {"twitterId": "25073877", "truthId": "1077...", "isReply": false, "isRetweet": false},
-   "suggestions": [], "stockSuggestions": [], "time": 1790866597524, "_id": "..."}
-```
+- **字段归一**（`normalize`）。同一条新闻有三种形状：WS 推送（`aiRating` 嵌套、`ts` 是毫秒）、REST 行（`aiRating.status` 可能还没到 done，`ts` 可能是 ISO 字符串）、免费热榜（`score/grade/signal` 平铺，`published_at` 带 +08:00）。全部归一成 `{id, text, news_type, engine_type, link, ts_ms, coins[], rating}`；`rating` 为空表示 AI 还没评完，这类条目挂起不交易。
+- **只交易开机之后的新闻。** REST 返回的行里，发布时间早于本进程启动的一律当历史，只记"已见"不交易，所以重启不会把上一页旧闻再交易一遍。WS 推送本来就是新的，不做这个过滤。
+- **断线补漏。** WS 每次（重新）订阅成功，用一次 REST 补上断线期间发布、但没推过来的条目。
+- **静默 WS 检测。** WS 在线时，每 `ws_audit_s`（5 分钟）用一次 REST 抽查：如果 REST 里有已评分、发布超过 2 分钟、WS 却从没推过的条目，说明推送在漏，报 `ws_gap` 并把漏掉的补进来；如果这次连接 WS 一条都没推过，REST 接管轮询。这防的是"套餐不含实时推送，但服务端照样接受订阅、然后什么也不推"。
+- **突发分页。** 一页 50 条全是开机后的新条目时，继续读第 2、3 页（每页一次调用）。
+- **错误分类。** HTTP 401/402/403 → token 无效或套餐不含该接口（`auth_fail`，5 分钟后重试）；429 或额度类错误 → `quota`（REST 暂停 10 分钟）；其他错误连续 3 次 → `rest_fail`。这些状态通过 `on_health` 回调变成 `feed` 类报警，出问题和恢复时各推一次。2026-10-28 用无效 token 对真实服务器实测：WS 握手 HTTP 401 `unauthorized`，REST 401 `{"error":"invalid token"}`，两条路径都按上面处理。
+- **HTML 清理。** 金十的汇总条目带 `<b>`、`<br/>`、`&#8217;`，标题里清掉，原文留在 `raw.nl.text`。
 
-WS 直推没有 `source` 字段，解析器用 `info.truthId` 判断是 Truth Social、`info.twitterId` 判断是推特。`title` 和 `body` 拼成一句。转推和回复直接返回 `None`（丢弃）。账号名从 "Name (@handle)" 的括号里抠出来；Truth Social 消息没抠到账号时默认 `realDonaldTrump`。
+**`hl_listings_feed`**（`feeds.py`）— 轮询 POST `{"type":"meta"}`（和 `{"type":"meta","dex":"xyz"}`），每个 dex 之后 sleep 1.5 秒、一轮之后 sleep `poll_s`（默认 5），两个 dex 的实际周期约 8 秒，把 `universe` 里非 `isDelisted` 的名字做成集合，和上一轮比较，新出现的名字生成一条 `source="hl_listings"` 的 NewsItem。第一轮只建基线不触发。sleep 是为了不撞 IP 限速。
 
-**`hl_listings_feed`** — 轮询 POST `{"type":"meta"}`（和 `{"type":"meta","dex":"xyz"}`），每个 dex 之后 sleep 1.5 秒、一轮之后 sleep `poll_s`（默认 5），两个 dex 的实际周期约 8 秒，把 `universe` 里非 `isDelisted` 的名字做成集合，和上一轮比较，新出现的名字生成一条 `source="hl_listings"` 的 NewsItem。第一轮只建基线不触发。sleep 是为了不撞 IP 限速。
-
-**`telegram_feed`** — 用 Telethon **用户会话**（不是 Bot，Bot API 读不了别人的频道）订阅公开频道的 `NewMessage` 事件。需要 `api_id`/`api_hash`（my.telegram.org 申请）和一个有一定账龄的账号。默认关闭。
-
-**`replay_feed`** — 读 JSONL，每行一条，字段 `title`/`channel`/`account`/`ts_ms`/`suggestions`。`speed=0` 尽快灌入，`speed=1` 按原始时间间隔重放。`source="replay"`，引擎对这个 source 跳过 20 秒时效过滤。
+**`replay_feed`**（`feeds.py`）— 读 JSONL。每行可以是 NewsLiquid 条目（三种形状都行，和实时条目一样分类）、BLS 宏观记录（`kind` / `parsed` / `consensus`），或者没有评分的普通标题（只落库，永远没有方向）。`speed=0` 尽快灌入，`speed=1` 按原始时间间隔重放。`source="replay"`，引擎对这个 source 跳过时效过滤。
 
 ### 4.3 macro.py：定时宏观数据的直采
 
-为什么单独写一个模块：CPI 的行情 15 秒走完大半，等 Tree of Alpha 转发 FirstSquawk 的推文要 5–20 秒，直接轮询 bls.gov 只要 1–3 秒。
+为什么单独写一个模块：CPI 的行情 15 秒走完大半，等新闻源转发要 5–20 秒（经过 NewsLiquid 的评分和轮询还要更久），直接轮询 bls.gov 只要 1–3 秒。这是保留下来的一手数据通道，不经过 NewsLiquid。
 
 `MacroScheduler.run` 的状态机：
 
@@ -267,12 +275,12 @@ stateDiagram-v2
     LoadSchedule --> Sleep: 解析 bls.gov/schedule 页面<br/>得到未来 CPI/NFP 的 08:30 ET 时刻
     Sleep --> Sleep: 距下一次发布 > 15 分钟<br/>睡 min(剩余−15min, 1h)
     Sleep --> Arm: 距发布 ≤ 15 分钟
-    Arm --> Wait: 拉 ForexFactory 周历 JSON<br/>取 forecast 写入 RuleContext
+    Arm --> Wait: 拉 ForexFactory 周历 JSON<br/>取 forecast 写入 ClassifyContext
     Wait --> Poll: 发布前 2 秒
     Poll --> Poll: 每 0.7 秒 GET 发布页<br/>解析数字，与基线比较
     Poll --> Emit: 数字变了（新一期发布）
     Poll --> Sleep: 20 秒内没变化，放弃
-    Emit --> Sleep: 生成 NewsItem 入队<br/>channel=usGov, account=BLS_gov
+    Emit --> Sleep: 生成 NewsItem 入队<br/>raw 里带数字和共识
 ```
 
 几个实现细节：
@@ -280,74 +288,60 @@ stateDiagram-v2
 - **日程解析**（`parse_bls_schedule`）：从 HTML 里正则出 "Oct. 14, 2026" 格式的日期，用 `zoneinfo` 的 America/New_York 转成 UTC（自动处理夏令时：夏令时 12:30 UTC，冬令时 13:30 UTC）。
 - **共识**（`ff_consensus`）：ForexFactory 的 `ff_calendar_thisweek.json` 只有 `forecast`/`previous`，没有 `actual`。匹配标题 "CPI y/y"、"Core CPI y/y"、"Non-Farm Employment Change"。注意这个 JSON 只覆盖**本周**，所以 T−15 分钟去拉是合理的。
 - **变化检测**（`_poll_release`）：发布页在发布前就存在，内容是上个月的数字。第一次 GET 的解析结果作为基线，之后任何一次解析结果不同就判定为新发布。
-- **解析器**（`parse_cpi`/`parse_nfp`）：从去标签后的正文里正则 "Over the last 12 months, the all items index increased 3.4 percent"（总体同比）、"all items less food and energy index rose 2.4 percent over the year"（核心同比）、"nonfarm payroll employment rose by 162,000"（NFP，自动把 162,000 换算成 162k 以和 FF 共识同单位）。已对 2026-09 的真实页面验证。
+- **解析器**（`parse_cpi`/`parse_nfp`）：从去标签后的正文里正则 "Over the last 12 months, the all items index increased 3.4 percent"（总体同比）、"all items less food and energy index rose 2.4 percent over the year"（核心同比）、"nonfarm payroll employment rose by 162,000"（NFP，自动把 162,000 换算成 162k 以和 FF 共识同单位）。已对 2026-09 的真实页面验证。这是解析政府网页的固定格式，不是判断新闻。
 - **请求头**：`UA` 常量里有联系方式占位符。BLS 会封匿名高频客户端，上线前把 `set-your-email@example.com` 改成真实邮箱。
-- 生成的 NewsItem 标题是 `BLS: CPI YoY ACTUAL 3.4% (FORECAST 3.1%); CORE CPI YoY ACTUAL 2.4% (FORECAST 2.6%)` 这种格式，规则车道能直接从标题里读出 ACTUAL 和 FORECAST，即使 `RuleContext` 里的共识没被注入也能工作。
+- **判断是算术。** 发布条目的 `raw` 带着 `kind`、`parsed`（实际值）和 `consensus`（预期），`classify_macro` 直接做减法判方向，不解析标题。标题 `BLS: CPI YoY ACTUAL 3.4% (FORECAST 3.1%); …` 只用于显示。
 
-**FOMC 没有实现**：日程里只加载了 cpi 和 empsit 两个页面，没有 Fed 新闻稿轮询。`classify_rules` 里有 FOMC 规则，但只能被中继来源的推文触发。
+**FOMC 没有直采**：日程里只加载了 cpi 和 empsit 两个页面。美联储决议作为 NewsLiquid 的新闻进来（金十、Reuters 等），走 `nl_news` 模板。
 
-### 4.4 classify.py：双车道分类器
+### 4.4 classify.py：评分到判断
 
-**为什么两条车道。** 规则快（<1 ms）、可控、可回测，但只覆盖措辞确定的事；LLM 覆盖广，但慢（0.5–2 秒）、贵、难回测，而且学术和实盘证据都说 LLM 单独做方向判断不行（nof1 Alpha Arena 六个模型两周四个亏过半；加入新闻源那一场七个模型六个为负）。所以规则管"确定的事"，LLM 只在规则不确定时补位，并且置信度被封顶。
+**为什么不再自己判断。** 旧版用一串正则规则（<1 毫秒，但只覆盖措辞确定的事，对中文快讯基本判噪音）加一条可选的 LLM 车道。现在判断交给 NewsLiquid：它给每条新闻和每个相关币种打分，覆盖中英文和 85 个来源。这里剩下的代码不读正文，只做映射和算术，三条车道：
 
-**`RuleContext`** 是规则的外部状态：币名别名表、交易范围、可信账号、以及宏观调度器注入的四个共识值。
+| 车道 | 输入 | 输出 |
+|---|---|---|
+| `newsliquid` | `raw.nl` 里的评分 | 事件类 = 引擎（news → `nl_news`，listing → `nl_listing`……）；方向 = signal；置信 = score / 100；标的 = 映射成功的币种；逐币方向和分数存进 `per_ticker` |
+| `macro` | BLS 发布条目的数字和共识 | CPI：总体差 + 核心差的绝对值 ≥0.1，偏热做空、偏冷做多，置信 0.85；非农：差 ≥50k，强于预期做空、弱于预期做多，置信 0.80；否则无方向 |
+| `hl_listing` | HL meta diff | LISTING_HL / LONG（占位）/ 0.90，引擎看首批成交改方向 |
 
-**`map_tickers`** 把一条新闻映射到 HL 币名：先看源给的 `suggestions`，再在标题里按别名表找整词（`(?<![a-z0-9])micron(?![a-z0-9])` 这种边界，避免 "meta" 匹配到 "metadata"）。只返回在 `universe` 里的。
+不是 NewsLiquid 条目、也不是一手数据的（比如回放里的普通标题）一律 `noise`。
 
-**`classify_rules` 的判断顺序**（顺序即优先级，先命中先返回）：
+**币种映射**（`map_symbol`）只做精确匹配，不猜：
 
-| # | 规则 | 触发 | 方向 | 置信 | 标的 |
-|---|---|---|---|---|---|
-| 0 | 预计算 | `trusted`（账号在白名单，或 channel 是 Binance EN/Upbit/Bithumb/usGov，或 source 是 hl_listings）；`is_rumor`（rumour/unconfirmed/reportedly/sources say/may be/问号结尾）；`denial`（not approved/has not/compromised/unauthorized tweet/denies/fake/retract/correction） | | | |
-| 1 | CPI | 含 "CPI" 或 "consumer price index"。解析 ACTUAL 和 FORECAST（标题内或 ctx 注入）。score = 总体差 + 核心差，四舍五入两位 | score>0（偏热）SHORT，否则 LONG；\|score\|<0.1 → NONE | 0.85 | BTC, ETH |
-| 2 | NFP | 含 "non-farm payrolls"/"NFP"。解析 ACTUAL（支持 162,000 / 162K）和 FORECAST | 差 ≥50k：强于预期 SHORT，弱 LONG；否则 NONE | 0.80 | BTC, ETH |
-| 3 | FOMC | 含 "FOMC"/"fed cuts rates"。解析动词（cut/raise/hold）和 bps，需要 ctx.fomc_expected_bps | 比预期更鸽 LONG，更鹰 SHORT | 0.80 | BTC, ETH |
-| 4 | HL 上币 | source == hl_listings | LONG（占位，引擎会在 3 秒后按首批成交方向改） | 0.90 | 新币 |
-| 5 | 交易所上币 | channel 是 Binance EN/Upbit/Bithumb，或 "will list"/"new listing"/"상장" | 只有明确上币措辞且币在 universe 且不是 BTC/ETH 才 LONG；否则 NONE。实际上对本 universe 永远是 NONE，只做记录 | 0.8/0.5 | |
-| 6 | 跟进报道预判 | launder/traces/moves funds/reopens/resumes/recover/post-mortem/after the hack/hacker/Q3 losses/update:/compensate… | 用于下一条 | | |
-| 7 | 黑客/exploit | exploit/hacked/drained/unauthorized withdrawals/security incident/suspicious outflows，且**不是** "unauthorized tweet"。解析金额（$1.46B → 1.46e9）。若命中跟进措辞 → NONE | 金额 ≥$100M 或涉及头部交易所 → SHORT | trusted 0.80 / 其他 0.60 | 标的或 BTC, ETH |
-| 8 | 脱锚 | depeg/loses peg/below $0.9x | SHORT | 0.80/0.60 | BTC, ETH |
-| 9 | ETF | 含 ETF。若 `denial` → 可信源 SHORT（反转），否则 NONE。approve/green light/grants → LONG；denied/reject/delay → SHORT | | 0.80/0.60 | 标的 |
-| 10 | 监管 | SEC sues/charges/wells notice；DOJ charges；crypto ban | SHORT | 0.80/0.60 | 标的 |
-| 11 | 关税 | 含 tariff。pause/suspend/exempt/deal → LONG；数字%/raise/impose/retaliate → SHORT；其他 NONE | | 0.80/0.60 | 标的或 BTC, ETH |
-| 12 | 特朗普 | 本人账号（或 truthId）或可信账号转述含 "TRUMP"。本人帖正文以 "RT @" 开头 → 转发忽略。含 bitcoin/crypto/digital assets + reserve/strategic/executive order/sign/ban/tax | ban/tax/crackdown SHORT，否则 LONG | 0.80 | BTC, ETH |
-| 13 | 财报 | 标的是 `xyz:` 开头，且来源是金融源（可信账号、通讯社博客、unusual_whales/DeItaone/FirstSquawk/CNBC/Reuters/Bloomberg…）。EPS/earnings/revenue/quarter results | beat 且无 miss → LONG；miss 且无 beat → SHORT；混合 → NONE | 可信/通讯社 0.80，其他 0.60 | 股票标的 |
-| 14 | 指引 | guidance/outlook/forecast + raises/boosts/lifts vs cuts/lowers/trims/withdraw | 上调 LONG，下调 SHORT；两者都命中或都不命中则继续往下匹配（最终多半落到 NOISE） | 同上 | 股票标的 |
-| 15 | 并购 | to acquire/acquisition/merger/takeover | NONE（规则分不清收购方和标的） | 0.50 | 股票标的 |
-| 16 | 兜底 | | NOISE / NONE | 0.0 | |
+- `BTC`、`ETH` 这类加密币标签：在 universe 里就用。
+- `XYZ-NVDA`：NewsLiquid 给 trade.xyz 股票永续的标签，映射成 `xyz:NVDA`。
+- 纯股票代码 `NVDA`：忽略。NewsLiquid 指 Hyperliquid 股票永续时总会加 `XYZ-` 标签（2026-10-28 热榜样本里，universe 内 11 只股票的标签出现了 123 次，其中带纯代码的 60 次全部同时带 `XYZ-`），而纯代码可能和同名加密代币撞。
+- `xyz:SKHX` 和 `xyz:SKHY` 是 Hyperliquid 上两个不同的合约，标签之间从不互相别名。
+- 名字对不上的（比如 `PEPE` → `kPEPE`）写进 `universe.symbol_map`。
 
-**置信度的两档设计。** 可信来源 0.80，非可信 0.60。模板门槛大多是 0.80，ETF/监管/脱锚是 0.85。对照一下就知道：在不开 LLM 的默认配置下，**只有可信来源的黑客/关税/特朗普/财报、BLS 直采的 CPI/NFP、HL 新上币能直接下单**；非可信来源一律 0.60 卡在门槛外；ETF/监管/脱锚三类即使可信来源也只有 0.80，过不了 0.85。开启 LLM 后，引擎在规则置信低于**该事件类自己的门槛**时调用 LLM，两条车道方向一致则置信提到 `max(规则, min(LLM, 0.85))`，这是这三类唯一的成交路径。设计意图：这三类历史上假新闻和"利好出尽"最多，要两个独立判断同时点头。
+**逐币评分。** NewsLiquid 文档写明顶层 `aiRating.score` 是所有币里的最高分，同一条新闻可能 BTC 84 分看多、ETH 55 分看空。`rating.use_coin_rating: true`（默认）时每个币用自己的方向和分数，所以一条新闻可能开出一多一空两条腿。
 
-**LLM 车道**（`classify_llm`）。一个约 250 token 的系统提示，要求只返回 JSON：`event_class`、`direction`、`confidence`、`tickers`、`is_rumor`、`reason`（≤12 词）。提示里明确写了"辟谣反转方向"、"不在列表里的资产返回空"、"定时数据没有实际值和共识就返回 none"。支持 Anthropic（默认 `claude-haiku-4-5`）和 OpenAI 兼容接口，超时 4 秒，任何异常返回 `None`（引擎当作没有 LLM 结果处理）。
+**没有逐币评分时怎么办**（`rating.item_rating_fallback`）。免费热榜的条目只有一个整条评分。整条评分是"所有币里的最高分"，当一条新闻同时标了原油、BTC、ETH 时，这个 long 很可能说的是原油。默认 `single`：只有当条目只涉及一个资产（`XYZ-NVDA` 和 `NVDA` 算同一个）时，才把整条评分套到这个币上；涉及多个资产时，没有自己评分的币不给方向，理由里写 `item rating not applied: N assets tagged`。回放里那条 82 分的伊朗条目（标签 CL、XYZ-CL、BTC、ETH、EPIC、SOL）就是这样被挡下的。`all` 恢复成全部套用，`none` 只认逐币评分。
 
-### 4.5 engine.py：主循环、去重、佐证、融合、持仓管理
+**最低分。** 低于 `rating.min_score`（60）的评分不给方向，`neutral` 也不给方向；它们照样落库，用来以后调门槛。
 
-**`Dedup`**。指纹算法：小写 → 去 URL → 去 "Name (@handle): " 前缀 → 只保留字母数字和 `%$.` → 取前 12 个词 → SHA1 前 16 位。10 分钟滑动窗口，最多记 5,000 条。同一条新闻的推特原文、CoinDesk 转述、Telegram 中继通常前 12 个词不同，所以这个去重是"宽松"的，主要防完全相同的转发；真正的"同一事件多来源"由下面的佐证器处理，而且那正是它需要看到多条的原因。
+### 4.5 engine.py：主循环、去重、门槛、二源佐证、持仓管理
 
-**`Corroboration`**。键是 `(event_class, coin, direction)`，值是 90 秒窗口内的 `(时间, 来源键)` 列表，来源键 = `f"{source}:{account or channel}"`。返回不同来源数。引擎逻辑：
+**`Dedup`**。指纹算法：小写 → 去 URL → 去 "Name (@handle): " 前缀 → 只保留字母数字和 `%$.` → 取前 12 个词 → SHA1 前 16 位；中文标题用前 24 个汉字加文中数字。10 分钟滑动窗口，最多记 5,000 条。同一事件的 Bloomberg、Reuters、推特版本通常前 12 个词不同，所以这个去重是"宽松"的，主要防完全相同的转发。
+
+**逐币决策**（`handle` 里的循环）：
 
 ```
-if 事件类 in require_two_sources_for and 不是可信来源 and 来源数 < 2:
-    打印 "waiting for corroboration"，跳过这个币
+for 币 in 分类给出的标的:
+    方向、分数 = per_ticker[币]（没有就用整条的）
+    事件类     = nl_news_stock if (nl_news 且币是 xyz:) else 原事件类
+    没有模板                        → 跳过（nl_market / nl_onchain / nl_meme / nl_prediction 默认没有）
+    新闻年龄 > 模板 max_news_age_s   → 跳过
+    分数 < 模板 min_conf             → 跳过（判断已落库）
+    来源在二源名单且来源数 < 2        → 拉起热窗口，打印 waiting for a second source，跳过
+    生成信号
 ```
 
-注意它是"跳过"而不是"挂起等待"：第二条来源到达时会自己走一遍完整流程，那时 `add` 返回 2 就放行了。所以同一事件最终是由**第二条**新闻触发交易，`news_age_s` 记录的也是第二条的延迟。
+**`Corroboration`**。键是 `(事件类, 币, 方向)`，值是窗口内的 `(时间, 来源键)` 列表，来源键 = `f"{source}:{newsType 小写}"`，所以两条推特永远只算一个来源。窗口默认 90 秒，`nl_news_stock` 30 分钟（股票新闻转述得慢）。只有过了门槛的条目才计入：第二个来源也得被 NewsLiquid 打到门槛以上。注意它是"跳过"而不是"挂起等待"：第二条来源到达时会自己走一遍完整流程，那时计数到 2 就放行了。所以同一事件最终由**第二条**新闻触发交易，`news_age_s` 记录的也是第二条的延迟。
 
-**何时调用 LLM**：规则结果是噪音、无方向、或置信低于该事件类模板的 `min_conf`（ETF/监管/脱锚是 0.85，所以可信来源的 0.80 也会送去复核）。
+**热窗口**只在"等第二来源"时拉起（最长 120 秒），让 REST 轮询从 15 秒降到 5 秒，第二条来得更快。旧版在任何有方向的标题之后都拉起；按 NewsLiquid 的条目量，那样会把 REST 额度用超（第 15 节）。
 
-**`_fuse`**（规则与 LLM 融合）：
-
-```
-两边都有方向且不一致            → 放弃（direction=NONE，原因写两边理由）
-规则有方向、LLM 弃权（none）    → 用规则结果原样
-规则有方向、LLM 同向            → 规则结果，置信 = max(规则, min(LLM, 0.85))
-规则无方向（噪音/none）         → 用 LLM 的方向，置信封顶 0.85，
-                                   标的优先用规则的（规则为 NOISE 时事件类用 LLM 的）
-```
-
-LLM 永远不能把置信推过 0.85，也永远不能让一条新闻绕过"可信来源"检查（佐证器看的是 item 的来源，不是分类的 lane）。融合结果以 `lane=fused` 另存一行到 `classifications` 表。
-
-**`handle`** 的完整顺序见第 3 节。几个边角：`template` 查不到的事件类（如 m_and_a）直接返回；`LISTING_HL` 允许标的不在 universe 里。
+**报警**。同一条新闻里模板带 `alert: true` 的信号合成一条 key_news 报警，同一（事件类, 币组合, 方向）6 小时内只推一次。
 
 **`_execute`**：
 
@@ -376,7 +370,7 @@ LLM 永远不能把置信推过 0.85，也永远不能让一条新闻绕过"可�
 |---|---|---|---|
 | 1 | 是否熔断 | `halted: daily loss 3.2%` / `halted: 3 consecutive order failures` | — |
 | 2 | 有方向 | `no direction` | — |
-| 3 | 置信 ≥ 模板门槛 | `confidence 0.60 < 0.8` | `templates.*.min_conf` |
+| 3 | 置信 ≥ 模板门槛 | `confidence 0.78 < 0.8`（NewsLiquid 条目在引擎里已按门槛过滤，这里主要兜底宏观和上币） | `templates.*.min_conf` |
 | 4 | 日亏 < 上限 | `daily loss limit hit (3.1%)` | `account.daily_loss_limit_pct` |
 | 5 | 周亏 < 上限 | `weekly loss limit hit (6.2%)` | `account.weekly_loss_limit_pct` |
 | 6 | 亏损后冷却 | `cooldown after loss` | `account.cooldown_after_loss_s` (900) |
@@ -404,7 +398,7 @@ stop_px   = mid × (1 ∓ stop_pct/100)
 tp_px     = mid × (1 ± tp_pct/100)
 ```
 
-`Decision.leverage` 返回的是 `lev_cap`（交易所侧要设的保证金杠杆），`Decision.equity_ratio` 是 `notional/equity`（这笔占了多少倍权益）。两者分开是因为：live 模式下交易所的杠杆设置决定占用多少保证金，设成模板上限 3x 意味着 $1,067 名义只占 $356 保证金，两个持仓可以并存；如果设成实际的 0.53x 会报错或占满保证金。日志里 `(0.53x equity, margin lev 3x)` 就是这两个数。
+`Decision.leverage` 返回的是 `lev_cap`（交易所侧要设的保证金杠杆），`Decision.equity_ratio` 是 `notional/equity`（这笔占了多少倍权益）。两者分开是因为：live 模式下交易所的杠杆设置决定占用多少保证金，设成模板上限意味着几百美元名义只占三分之一到二分之一的保证金，两个持仓可以并存；如果设成实际的 0.33x 会报错或占满保证金。日志里 `(0.33x equity, margin lev 2x)` 就是这两个数。
 
 ### 4.7 hl.py：行情、滑点估计、paper 与 live 执行
 
@@ -435,16 +429,17 @@ tp_px     = mid × (1 ± tp_pct/100)
 
 ### 4.8 store.py：SQLite 里有什么
 
-六张表，WAL 模式，线程锁保护。
+七张表，WAL 模式，线程锁保护。表结构这次没变，旧数据库可以直接用。
 
 | 表 | 一行是什么 | 关键列 |
 |---|---|---|
-| `news` | 每一条进入引擎的新闻（去重前） | id, source, channel, account, title, ts_ms, recv_ms, age_s, raw(JSON) |
-| `classifications` | 每一次分类结果，一条新闻可能有 rules 和 llm 两行 | news_id, lane, event_class, direction, confidence, tickers, reason, is_rumor, latency_ms |
-| `signals` | 过了分类和佐证、进入风控的 | id, news_id, coin, direction, event_class, confidence, template(JSON), news_age_s |
+| `news` | 每一条进入引擎的新闻（去重前） | id, source, channel, account, title, ts_ms, recv_ms, age_s, raw(JSON，NewsLiquid 条目在 `raw.nl`，评分延迟在 `raw.nl_first_seen_ms` / `raw.nl_rated_ms`) |
+| `classifications` | 每一次分类结果，一条新闻一行 | news_id, lane（newsliquid / macro / hl_listing / none）, event_class, direction, confidence, tickers, reason（逐币方向和分数写在这里）, latency_ms |
+| `signals` | 过了门槛和佐证、进入风控的 | id, news_id, coin, direction, event_class, confidence, template(JSON), news_age_s |
 | `decisions` | 风控结果，接受或拒绝都有 | signal_id, accepted, reason |
 | `positions` | 持仓，开仓时插入，平仓时 REPLACE | 全部 Position 字段 |
 | `equity` | 每分钟一行 | ts_ms, equity_usd, open_positions |
+| `alerts` | 每一次报警（key_news / open / close / halt / feed） | ts_ms, kind, title, body, meta |
 
 `Store.summary()` 返回新闻数、信号数、已平仓数、胜数、总盈亏、按事件类分组的统计。
 
@@ -452,12 +447,13 @@ tp_px     = mid × (1 ± tp_pct/100)
 
 输入 `data/events.jsonl`，每行 `{ts_utc, coin, direction, event_class, note}`。对每个事件：
 
-1. 从 Binance 拉 1 分钟 K（`BTC`→`BTCUSDT`，`ETH`→`ETHUSDT`；HIP-3 标的没有免费分钟级历史，除非事件里给 `symbol` 字段，否则跳过）。
-2. 在 `ts_utc + delay` 处按分钟内线性插值得到入场价。
-3. 逐根 K 线检查：先止损（用 low/high 触碰）、再止盈、再时间止损（用 close）。
-4. 收益扣 0.09% 往返费 + 0.04% 往返滑点。
+1. 找模板：先按 `event_class` 找；找不到（旧的规则车道标签，如 hack_exploit、etf）就用今天会用的 NewsLiquid 模板，加密币 `nl_news`、`xyz:` 股票 `nl_news_stock`。
+2. 从 Binance 拉 1 分钟 K（`BTC`→`BTCUSDT`，`ETH`→`ETHUSDT`；HIP-3 标的没有免费分钟级历史，除非事件里给 `symbol` 字段，否则跳过）。
+3. 在 `ts_utc + delay` 处按分钟内线性插值得到入场价。
+4. 逐根 K 线检查：先止损（用 low/high 触碰）、再止盈、再时间止损（用 close）。
+5. 收益扣 0.09% 往返费 + 0.04% 往返滑点。
 
-输出按事件类的 n、胜率、均值、中位、总 R 倍数、各退出原因计数，以及 `breakeven_win_rate_if_tp_or_stop = stop/(stop+tp)`（如果每笔要么止盈要么止损，这个胜率是盈亏平衡点）。
+输出按事件类（历史标签）的 n、胜率、均值、中位、总 R 倍数、各退出原因计数，以及 `breakeven_win_rate_if_tp_or_stop = stop/(stop+tp)`（如果每笔要么止盈要么止损，这个胜率是盈亏平衡点）。
 
 `--sweep` 对延迟 5/20/60/180/300 秒各跑一遍。CPI 的结果是 5 秒 66% 胜率、20 秒 53%、60 秒归零、180 秒为负，这直接决定了"CPI 只在 BLS 直采路径下交易"这个设计决定。
 
@@ -470,13 +466,13 @@ python -m hlnews.run [--config config.yaml] [--replay FILE] [--speed 0] [--durat
 | 参数 | 作用 |
 |---|---|
 | `--config` | 配置文件路径，默认 `config.yaml` |
-| `--replay FILE` | 用 JSONL 替代所有实时源。**拒绝在 live 模式下回放** |
+| `--replay FILE` | 用 JSONL 替代 NewsLiquid 和上币探测。**拒绝在 live 模式下回放** |
 | `--speed` | 回放速度，0 = 尽快，1 = 实时 |
 | `--duration` | 跑多少秒后退出，0 = 直到 Ctrl-C。回放时默认 20 秒 |
 | `--paper` | 无视配置强制 paper |
 | `--summary` | 只打印数据库汇总，不启动引擎 |
 
-启动顺序：读配置 → 建日志（同时写 stdout 和 `data/hlnews.log`）→ 建 Store → 建 HLClient 并 `start()` → 按配置组装 feed 列表 → 建 Engine → 注册 SIGINT/SIGTERM → 跑。退出时：取消主任务 → `engine.shutdown()` 平掉所有持仓 → 等 0.3 秒让连接关干净 → 打印汇总。
+启动顺序：读配置 → 建日志（同时写 stdout 和 `data/hlnews.log`）→ 建 Store → 建 HLClient 并 `start()` → 组装上币探测 → 建 Engine → 挂上 NewsLiquid 源（带健康回调，出问题和恢复时各推一次 `feed` 报警）→ 注册 SIGINT/SIGTERM → 跑。退出时：取消主任务 → `engine.shutdown()` 平掉所有持仓 → 等 0.3 秒让连接关干净 → 打印汇总。
 
 ---
 
@@ -505,51 +501,48 @@ account:
 
 universe:
   crypto: ["BTC", "ETH"]
-  stocks: ["xyz:TSLA", "xyz:NVDA", ...]
-  ticker_aliases:               # 自由文本 → HL 币名，map_tickers 用整词匹配
-    bitcoin: BTC
-    micron: xyz:MU
-    ...
+  stocks: ["xyz:TSLA", "xyz:NVDA", ...]   # HL 合约名；NewsLiquid 的 XYZ-NVDA 标签自动映射到 xyz:NVDA
+  symbol_map: {}                # 标签和 HL 名字对不上时手工指定，如 {PEPE: kPEPE}
 
 feeds:
-  max_age_s: 20                 # 引擎入口：所有实时源的消息超过 20 秒直接丢
-  treeofalpha:
+  max_age_s: 120                # 没单独写的源，入口时效
+  max_age_by_source: {newsliquid: 1800, hl_listings: 60, bls_poll: 60}
+  newsliquid:
     enabled: true
-    ws_url: wss://news.treeofalpha.com/ws
-    api_key: ""                 # 可选，免费 key；付费档才需要
-    max_age_s: 20               # feed 层的同样过滤（双保险）
-  telegram:
-    enabled: false
-    api_id: 0                   # my.telegram.org 申请
-    api_hash: ""
-    session: hlnews.session     # Telethon 会话文件，已在 .gitignore
-    channels: ["BWEnews", "CLWfeed", "WatcherGuru"]
-  hl_listings:
-    enabled: true
-    poll_s: 5
-  macro:
-    enabled: true               # BLS 日程 + FF 共识 + 发布秒级轮询
+    token_env: OPENNEWS_TOKEN   # 从这个环境变量读 token；token 本身不要写进配置
+    transport: auto             # auto | ws | rest
+    engine_types: {news: [], listing: []}   # 订阅哪些引擎；[] = 该引擎全部来源，也可以写来源代码
+    coins: []                   # 只订某些标签，如 ["BTC", "XYZ-NVDA"]；空 = 全部
+    has_coin: true              # 只要标了币种的条目
+    poll_s: 15                  # REST 间隔；每次调用扣额度
+    fast_poll_s: 5              # 热窗口里的 REST 间隔
+    page_size: 50
+    max_pages: 3                # 突发时最多读几页
+    ws_retry_s: 1800            # WS 被拒后多久再试
+    ws_audit_s: 300             # WS 在线时多久用 REST 抽查一次（0 = 不查）
+    backfill_on_reconnect: true
+  hl_listings: {enabled: true, poll_s: 5}
+  macro: {enabled: true}        # BLS 日程 + FF 共识 + 发布秒级轮询
 
-classifier:
-  llm:
-    enabled: false              # 关闭时只有规则车道，完全确定性
-    provider: anthropic         # anthropic | openai
-    model: claude-haiku-4-5
-    timeout_s: 4.0
-    max_tokens: 200
-    min_confidence: 0.75        # 当前代码未使用，保留给将来
-  rules:
-    trusted_accounts: [...]     # 置信 0.80 档 + 免二源佐证
-    require_two_sources_for: [hack_exploit, regulatory, etf, m_and_a, tariff, trump_policy]
-    corroboration_window_s: 90
+rating:
+  min_score: 60                 # 低于此分只落库、不给方向
+  use_coin_rating: true         # 有逐币评分时用逐币的
+  item_rating_fallback: single  # 没有逐币评分时：single 只对单资产条目套用整条评分 | all | none
+  require_two_sources_for: [twitter, twitter/x, x / twitter profile, telegram, weibo, medium]
+  corroboration_window_s: 90
+  corroboration_window_by_class: {nl_news_stock: 1800}
 
 templates:                      # 见第 6 节
-  macro_cpi: {hold_s: 1800, stop_pct: 0.8, tp_pct: 1.2, risk_pct: 0.5, max_lev: 3, min_conf: 0.8}
+  nl_news: {hold_s: 3600, stop_pct: 1.5, tp_pct: 2.5, risk_pct: 0.5, max_lev: 2, min_conf: 0.8, alert: true, max_news_age_s: 300}
   ...
 
 storage:
   sqlite_path: data/hlnews.db
   log_path: data/hlnews.log
+
+alerts:                         # 报警：key_news / open / close / halt / feed；Telegram 需要 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
+  on: [key_news, open, close, halt, feed]
+  dedup_s: 21600
 
 maintenance_window:             # Hyperliquid 每周升级的只挂单窗口
   enabled: true
@@ -558,9 +551,10 @@ maintenance_window:             # Hyperliquid 每周升级的只挂单窗口
   end_utc: "09:35"
 ```
 
-两个容易混淆的点：
+三个容易混淆的点：
 
-- `feeds.max_age_s` 和 `feeds.treeofalpha.max_age_s` 是两层过滤，前者在引擎入口对所有源生效，后者在 ToA feed 内部。保持一致即可。
+- `feeds.max_age_by_source.newsliquid`（30 分钟）是入口的粗过滤，真正决定能不能交易的是各模板的 `max_news_age_s`（`nl_news` 5 分钟、`nl_news_stock` 30 分钟、`nl_listing` 2 分钟）。
+- NewsLiquid 模板的 `min_conf` 就是评分 / 100（0.8 = 80 分）；`rating.min_score` 是更低的一道线，决定"有没有方向"，低于它的只落库。
 - `templates.*.max_lev` 是**两个意思**：风控里它封顶名义（名义 ≤ 权益 × max_lev），live 执行里它是设给交易所的保证金杠杆。
 
 ---
@@ -571,35 +565,30 @@ maintenance_window:             # Hyperliquid 每周升级的只挂单窗口
 |---|---|---|---|---|---|---|---|
 | `macro_cpi` | 30 min | 0.8% | 1.2% | 0.5% | 3x | 0.80 | CPI 是一次性重定价，1 分钟走完 76%，4 小时后波动回到基线的 1.5–2 倍。持仓窗口短。止损 0.8% 是让往返成本（0.13%）占比 <20% 的最小值 |
 | `macro_nfp` | 60 min | 0.9% | 1.2% | 0.4% | 2x | 0.80 | 第一分钟只走完 36%，但 23% 概率 30 分钟内翻转。风险更小、杠杆更低 |
-| `macro_fomc` | 60 min | 1.0% | 1.2% | 0.4% | 2x | 0.80 | 翻转率 27%，2025 年 8 次会议 7 次 48 小时后为负。保守 |
-| `hack_exploit` | 90 min | 1.5% | 2.5% | 0.8% | 3x | 0.80 | Bybit 案例：发帖后 30 分钟 −4%，60 分钟 −2.5%（已反弹）。90 分钟足够吃到极值；这类方向最确定，风险预算最大 |
-| `depeg` | 90 min | 1.5% | 2.5% | 0.6% | 2x | 0.85 | USDC 2023 是 4 小时慢跌，USDe 2025-10-10 是 40 分钟修复。方向确定但形态多变 |
-| `etf` | 60 min | 1.5% | 2.0% | 0.5% | 2x | 0.85 | 真批准常是利好出尽（BTC ETF 批准后 13 天 −21%），假批准 15 分钟来回。门槛 0.85 高于规则上限 0.80，只有 LLM 同向确认才能成交 |
-| `regulatory` | 60 min | 1.5% | 2.0% | 0.5% | 2x | 0.85 | 同上 |
-| `tariff` | 60 min | 1.5% | 2.5% | 0.6% | 2x | 0.80 | 2025-04-09 暂停：5 分钟 +2.2%，60 分钟 +5.2%，次日回吐。10-10 升级：5 分钟 −1.7%，清算潮在 20–30 分钟后 |
-| `trump_policy` | 60 min | 1.5% | 2.5% | 0.6% | 2x | 0.80 | 储备帖：5 分钟 +2.3%，60 分钟 +4.3%，30 小时后全部回吐 |
 | `listing_hl` | 10 min | 3.0% | 4.0% | 0.3% | 2x | 0.90 | 没有公开研究，纯动量假设。持仓最短、风险最小、止损最宽（新币波动大） |
-| `earnings` | 120 min | 2.0% | 3.0% | 0.6% | 3x | 0.80 | 财报夜 70% 价格发现在前 5 分钟完成，之后赌 2 小时漂移。股票永续手续费低（0.009%）所以成本不是问题 |
-| `guidance` | 120 min | 2.0% | 3.0% | 0.6% | 3x | 0.80 | 同上 |
-| `m_and_a` | — | — | — | — | — | — | 无模板。规则分不清收购方和被收购方 |
+| `nl_news` | 60 min | 1.5% | 2.5% | 0.5% | 2x | 0.80（80 分） | 沿用旧版黑客 / 关税 / 特朗普类的形状：Bybit 被盗发帖后 30 分钟 −4%，关税暂停 60 分钟 +5.2%，储备帖 60 分钟 +4.3%，这类冲击的第一个极值在 2–5 分钟后，1 小时内多半走完。风险预算取 0.5%，因为评分的准确率还没验证。新鲜度 5 分钟 |
+| `nl_news_stock` | 120 min | 2.0% | 3.0% | 0.5% | 2x | 0.80 | 沿用旧版财报 / 指引：财报夜 70% 价格发现在前 5 分钟，之后赌 2 小时漂移。新鲜度放宽到 30 分钟，股票新闻在加密圈扩散得慢（东芝 HDD 那次 WDC 永续 13 小时后才动） |
+| `nl_listing` | 10 min | 3.0% | 4.0% | 0.3% | 2x | 0.85 | 交易所上币。BTC/ETH 和股票永续都谈不上"上币"，对当前 universe 几乎不会触发；`trade: false` 只报警。扩大 universe（比如加 SOL、HYPE）后再决定开不开 |
+| `nl_market` / `nl_onchain` / `nl_meme` / `nl_prediction` | — | — | — | — | — | — | 无模板，即使在 `engine_types` 里订阅了也只落库。行情异动是价格本身的派生，链上只覆盖 Hyperliquid 大户，meme 和预测类没有验证 |
 
-**改模板的方法论**：跑 `backtest.py --sweep` 看该类对延迟的敏感性；在 paper 积累 ≥30 笔后看 `positions` 表里该类的 `exit_reason` 分布——`time_stop` 占比过高说明 tp 太远或 hold 太短，`stop` 占比过高说明 stop 太近或方向有问题。
+旧版的 `macro_fomc`、`hack_exploit`、`depeg`、`etf`、`regulatory`、`tariff`、`trump_policy`、`earnings`、`guidance`、`supply_*` 模板已删除。它们对应的是规则车道识别出的事件类型，而 NewsLiquid 不输出事件类型，这些新闻现在都落在 `nl_news` / `nl_news_stock` 里。代价是不能再按事件类型给不同的持仓时间，见第 12 节。
+
+**改模板的方法论**：跑 `backtest.py --sweep` 看该类对延迟的敏感性；在 paper 积累 ≥30 笔后看 `positions` 表里该类的 `exit_reason` 分布——`time_stop` 占比过高说明 tp 太远或 hold 太短，`stop` 占比过高说明 stop 太近或方向有问题。门槛（`min_conf`）则看第 8 节最后一条查询：70–80 分那一档的新闻之后价格怎么走。
 
 **止盈的已知改进**：当前是单一目标全平。第二部分 B5 节建议改成 TP1 减半 + 止损移到保本，这需要在 `_manage_positions` 里加一个 `partial_taken` 状态。
 
 ---
 
-## 7. 并发模型：五个协程怎么协作
+## 7. 并发模型：几个协程怎么协作
 
-全部在一个 `asyncio` 事件循环里，没有多进程、没有多线程（SDK 的同步 HTTP 调用通过 `run_in_executor` 丢到默认线程池）。
+全部在一个 `asyncio` 事件循环里，没有多进程（SDK 的同步 HTTP 调用和 NewsLiquid 的 REST 请求通过 `run_in_executor` 丢到默认线程池）。
 
 ```mermaid
 flowchart TB
     subgraph producers[生产者协程]
-        P1[_pump: treeofalpha_feed]
+        P1[_pump: newsliquid_feed<br/>内部 ws_loop + rest_loop]
         P2[_pump: hl_listings_feed]
         P3[MacroScheduler.run]
-        P4[_pump: telegram_feed<br/>可选]
     end
     Q[(asyncio.Queue<br/>maxsize 10000)]
     C[_consume → handle<br/>单消费者，顺序处理]
@@ -611,7 +600,6 @@ flowchart TB
     P1 --> Q
     P2 --> Q
     P3 --> Q
-    P4 --> Q
     Q --> C
     C -->|开仓 append| S
     M -->|读 mids 判断<br/>平仓 remove| S
@@ -621,7 +609,8 @@ flowchart TB
 
 关键性质：
 
-- **单消费者**。`_consume` 一次只处理一条新闻，`handle` 里的 LLM 调用（最长 4 秒）会阻塞后面的新闻。对这个策略可以接受（事件之间通常隔很久），但如果开了 LLM 又遇到新闻风暴，队列会堆积。要改成并发消费需要给 `Corroboration` 和 `state.open` 加锁。
+- **单消费者**。`_consume` 一次只处理一条新闻。分类是纯计算（<1 毫秒），开仓时的盘口查询和下单会让后面的新闻多等几百毫秒，对这个策略可以接受。要改成并发消费需要给 `Corroboration` 和 `state.open` 加锁。
+- **NewsLiquid 源内部还有两个协程**：`ws_loop` 和 `rest_loop` 共用一个内部队列和一个"已见 id"集合，所以同一条新闻从 WS 和 REST 各来一次也只会出现一次。
 - **`state.open` 的竞争**。`handle` 追加、`_manage_positions` 删除，两者都在事件循环里且没有 `await` 穿插在读写之间，所以不需要锁。
 - **行情是拉不是推**。所有决策都基于 `hl.mids`，它每 2 秒更新一次。这意味着止损判断最多滞后 2 秒加 RTT。live 模式下交易所侧止损单是第一道防线，本地判断是第二道。
 - **HL 请求有一把锁**。`open_position`/`close_position` 的交易所调用在 `asyncio.Lock` 内，避免同一 API 钱包并发签名撞 nonce。
@@ -633,33 +622,42 @@ flowchart TB
 ### 日志行
 
 ```
-OPEN PAPER short ETH size=0.39690 @ 2686.9000 notional=$1066 (0.53x equity, margin lev 3x) stop=2727.2542 tp=2619.7762 hold=5400s news_age=675.8s slip=0.2bps
+OPEN PAPER long BTC size=0.00828 @ 80506.6992 notional=$667 (0.33x equity, margin lev 2x) stop=79292.9925 tp=82513.0125 hold=3600s news_age=285190.4s slip=0.8bps
 ```
 
 | 片段 | 含义 |
 |---|---|
 | `PAPER` | 模式 |
-| `short ETH size=0.39690 @ 2686.9` | 方向、币、数量、成交价 |
-| `notional=$1066` | 名义价值 |
-| `0.53x equity` | 名义是权益的 0.53 倍（风控算出来的实际敞口） |
-| `margin lev 3x` | live 模式会设给交易所的杠杆（paper 只是记录） |
+| `long BTC size=0.00828 @ 80506.6992` | 方向、币、数量、成交价 |
+| `notional=$667` | 名义价值 |
+| `0.33x equity` | 名义是权益的 0.33 倍（风控算出来的实际敞口） |
+| `margin lev 2x` | live 模式会设给交易所的杠杆（paper 只是记录） |
 | `stop / tp` | 止损价、止盈价 |
-| `hold=5400s` | 时间止损，90 分钟 |
-| `news_age=675.8s` | 新闻源时间戳到本机处理的延迟。回放时这个数没意义；实时跑时正常应是 0.5–3 秒，大了说明源慢或本机卡 |
-| `slip=0.2bps` | 盘口估算的滑点 |
+| `hold=3600s` | 时间止损，60 分钟 |
+| `news_age=285190.4s` | 新闻源时间戳到本机处理的延迟。回放时这个数没意义；实时跑时 WS 推送应在几秒以内，REST 轮询会再多 0–15 秒 |
+| `slip=0.8bps` | 盘口估算的滑点 |
 
 ```
-REJECT hack_exploit short ETH: confidence 0.60 < 0.8
+REJECT macro_cpi short BTC: per-coin cooldown BTC
 ```
 风控拒绝，原因是第 4.6 节表里的 11 种之一。
 
 ```
-waiting for corroboration (1 source) trump_policy BTC: ...
+waiting for a second source (Twitter, 1 so far) nl_news long ETH: ...
 ```
-不是拒绝，是等第二个来源。90 秒内没来就自然过期。
+不是拒绝，是等第二个来源。窗口内没来就自然过期。
 
 ```
-CLOSE PAPER short ETH @ 2686.6000 reason=stop pnl=$-16.42 fees=$0.96 equity=$1983.58
+NewsLiquid WS subscribed {"engineTypes": {"news": [], "listing": []}, "hasCoin": true}
+NewsLiquid WebSocket refused (401); REST polling carries the feed; retry in 30 min
+NewsLiquid REST refused: HTTP 401 {"error":"invalid token","success":false} (token invalid, or the plan does not include news_search)
+NewsLiquid WebSocket missed 2 rated item(s) that REST returned
+NewsLiquid quota / rate limit: HTTP 429 ...; pausing REST for 10 min
+```
+NewsLiquid 源的状态：WS 订阅成功；WS 被拒改走 REST（`auto` 模式下套餐不含推送时就是这样，不用管）；token 无效；抽查发现推送漏条；额度用完或限流。
+
+```
+CLOSE PAPER long BTC @ 80502.0000 reason=stop pnl=$-10.42 fees=$0.60 equity=$1989.58
 ```
 `reason` 是 `stop` / `take_profit` / `time_stop` / `pre_maintenance` / `shutdown` 之一。`pnl` 已扣双边手续费。
 
@@ -680,26 +678,30 @@ armed cpi consensus={'yoy': 3.1, 'core_yoy': 2.6} release at 2026-10-14T12:30:00
 -- 拒绝原因分布：调参的起点
 select reason, count(*) from decisions where accepted=0 group by reason order by 2 desc;
 
--- 每类事件的分类分布：规则在触发什么
+-- 每类事件的分类分布
 select event_class, direction, lane, count(*) from classifications group by 1,2,3 order by 4 desc;
 
--- 哪些账号在发什么（前 30）
-select account, count(*) from news group by 1 order by 2 desc limit 30;
+-- NewsLiquid 各来源的条目量和延迟（实时跑时）
+select channel, count(*), round(avg(age_s),1) avg_age_s, round(max(age_s),1) max_age_s
+from news where source='newsliquid' group by 1 order by 2 desc limit 30;
+
+-- NewsLiquid 的 AI 评分延迟（WS 推送时才有 first_seen）
+select channel, count(*),
+       round(avg(json_extract(raw,'$.nl_rated_ms') - json_extract(raw,'$.nl_first_seen_ms'))/1000.0, 1) ai_delay_s
+from news where source='newsliquid' and json_extract(raw,'$.nl_first_seen_ms') is not null group by 1;
 
 -- 已平仓按退出原因
 select event_class, exit_reason, count(*), round(sum(pnl_usd),2), round(avg(pnl_usd),2)
 from positions where exit_ms is not null group by 1,2;
 
--- 新闻延迟分布（实时跑时）
-select channel, round(avg(age_s),2), max(age_s), count(*) from news group by 1;
-
--- 待复核：有方向但置信不够的
+-- 待复核：有方向但没到门槛的（70–80 分）
 select n.title, c.event_class, c.direction, c.confidence, c.reason
 from classifications c join news n on n.id=c.news_id
-where c.direction!='none' and c.confidence<0.8 order by n.recv_ms desc limit 50;
+where c.lane='newsliquid' and c.direction!='none' and c.confidence between 0.7 and 0.8
+order by n.recv_ms desc limit 50;
 ```
 
-最后一条是 paper 期间每周要看的：这 49 条/周"差一点"的新闻里，哪些其实该交易（把来源加进 `trusted_accounts`）、哪些是规则误报（加跟进词或排除词）。
+最后一条是 paper 期间每周要看的：70–80 分、有方向但没交易的新闻，之后的价格是否真的按方向走了。如果 75 分的和 85 分的一样准，就把门槛放低；如果某个来源的条目总是错，就把它加进二源名单或从订阅里拿掉。
 
 ---
 
@@ -707,7 +709,7 @@ where c.direction!='none' and c.confidence<0.8 order by n.recv_ms desc limit 50;
 
 | 阶段 | 做什么 | 通过条件 |
 |---|---|---|
-| **Paper**（现在） | 真实新闻 + 真实价格 + 模拟成交。每周看 decisions 表 | ≥60 个信号；按事件类统计胜率和 R 倍数；人工复核规则误报率 <10% |
+| **Paper**（现在） | 真实新闻 + 真实价格 + 模拟成交。每周看 decisions 表和第 8 节的复核查询 | ≥60 个信号；按事件类、分数段、来源统计胜率和 R 倍数；评分方向与随后价格方向的一致率明显高于 50% |
 | **Testnet** | `network: testnet`，走真实下单路径 | 100 笔下单无异常；验证 nonce、价格舍入、止损单触发、HIP-3 逐仓、取消挂单 |
 | **Live 小仓** | 1,000–3,000 USDC，`max_risk_per_trade_pct: 0.5` | ≥100 笔；期望为正；`userFills` 实际成交价与 paper 滑点估计偏差 <2 倍 |
 
@@ -748,109 +750,113 @@ where c.direction!='none' and c.confidence<0.8 order by n.recv_ms desc limit 50;
 | IP 限速 1,200 权重/分钟；连续十几次 POST 会 429 | 行情中断 | 两个 dex 之间 sleep 0.6s；meta diff 之间 sleep 1.5s；轮询 2s |
 | OI 上限（xyz 每币有名义上限） | 下单返回 `PositionIncreaseAtOpenInterestCap` | 当作一次下单失败，不重试 |
 | ADL（自动减仓） | 盈利仓位可能被交易所强制平掉 | 无法防御，接受 |
-| 周末 HIP-3 预言机是内部 EMA + 发现边界 ±(1/杠杆) | 永续被钉在真实缺口之下；SKHX 事件 2.7 秒内清算 | 股票模板 max_lev 3x；周末持仓需按周一缺口想止损（当前未特殊处理） |
+| 周末 HIP-3 预言机是内部 EMA + 发现边界 ±(1/杠杆) | 永续被钉在真实缺口之下；SKHX 事件 2.7 秒内清算 | 股票模板 max_lev 2x；周末持仓需按周一缺口想止损（当前未特殊处理） |
 
 ---
 
-## 11. 怎么改：加新闻源、加事件类、改模板、接 LLM
+## 11. 怎么改：调门槛、改来源、加模板、加一手数据源
 
-### 加一个新闻源
+### 调门槛
 
-在 `feeds.py` 写一个 `async generator`，yield `NewsItem`：
+- 交易门槛：`templates.nl_news.min_conf` 和 `templates.nl_news_stock.min_conf`（0.8 = 80 分）。
+- 方向门槛：`rating.min_score`（默认 60），低于它只落库。
+- 控制台"控制与配置"页可以直接改这两类数字。
 
-```python
-async def my_feed(...) -> AsyncIterator[NewsItem]:
-    while True:
-        for raw in await fetch_somewhere():
-            yield NewsItem(
-                id=f"my_{raw['id']}", source="my_feed", channel="MyChannel",
-                title=raw["text"], url=raw.get("url", ""),
-                ts_ms=raw["published_ms"], recv_ms=now_ms(),
-                account=raw.get("author"), suggestions=[], raw=raw,
-            )
-        await asyncio.sleep(5)
+### 改订阅的来源
+
+`feeds.newsliquid.engine_types` 是引擎到来源代码的映射，`[]` 表示该引擎的全部来源：
+
+```yaml
+feeds:
+  newsliquid:
+    engine_types:
+      news: ["Bloomberg", "Reuters", "jin10", "BWEnews"]   # 只要这几个新闻源
+      listing: []                                         # 全部上币公告
+      market: []                                          # 加订行情异动（没有模板，只落库）
 ```
 
-然后在 `run.py` 的 feed 组装处按配置加入列表。`source` 字段会出现在佐证器的来源键里，所以不同源对同一事件算不同来源。
+完整的来源代码表用 token 调 `GET https://ai.6551.io/open/news_type`。`coins` 可以只订部分标签（如 `["BTC", "ETH", "XYZ-NVDA"]`），能省一点额度。
 
-### 加一个事件类
+### 改二源名单
 
-1. `models.EventClass` 加枚举值。
-2. `classify.classify_rules` 加一段 `if ... return done(...)`，放在合适的优先级位置。
-3. `config.yaml` 的 `templates` 加一行；如果需要二源佐证，加进 `require_two_sources_for`。
-4. `data/replay.jsonl` 加一两条测试标题，跑回放确认。
+`rating.require_two_sources_for`，写 NewsLiquid 的 newsType（不分大小写）。控制台里也能改。从名单里删掉某个来源，意味着它的单条高分消息可以直接开仓；只删你确认从不发假消息的来源。
 
-### 改可信账号名单
+### 加交易的类别或标的
 
-`classifier.rules.trusted_accounts`。加入意味着两件事：该账号的规则命中置信升到 0.80 档，且免二源佐证。所以只加"从不发假消息"的账号。推特账号名不区分大小写。
+- 让 `nl_market` 这类引擎也能交易：订阅它（`engine_types` 里加），再在 `templates` 里给它加一行。
+- 加股票或币：`universe.crypto` / `universe.stocks` 里加 HL 合约名（如 `xyz:AMD`），NewsLiquid 的 `XYZ-AMD` 标签会自动映射；名字对不上的写进 `universe.symbol_map`。
 
-### 接 LLM 车道
+### 加一手数据源
 
-```bash
-pip install anthropic
-export ANTHROPIC_API_KEY=sk-ant-...
-```
-`config.yaml` 改 `classifier.llm.enabled: true`。之后每条规则不确定的新闻会多一行 `lane=llm` 的分类记录，融合后再多一行 `lane=fused`。成本：Haiku 4.5 约每千条 $0.25–0.48，按过去一周的量（49 条/周需复核）可以忽略；如果你想对**所有**新闻都跑 LLM（改 `handle` 里的条件），约 370 条/天，每月 $5–10。
+像 BLS 那样自己采、自己用算术判断的数据，比如 FOMC 声明页：
 
-### 加 Telegram
-
-```bash
-pip install telethon
-```
-在 my.telegram.org 申请 `api_id`/`api_hash`，填进配置，`enabled: true`。第一次运行会在终端要手机号和验证码，之后会话存在 `hlnews.session`。用一个有账龄的账号，新号加入频道容易被限制。
+1. 在 `feeds.py`（或一个新模块）写一个 `async generator`，yield `NewsItem`，把解析出的数字放进 `raw`。
+2. `models.EventClass` 加枚举值；`classify.classify()` 加一个分支，按 `raw` 里的数字返回 `Classification`（`lane` 自己起名）。
+3. `config.yaml` 的 `templates` 加一行；`run.py` 里把源加进 feed 列表。
+4. `data/replay.jsonl` 加一条对应的记录，跑回放和测试确认。
 
 ---
 
 ## 12. 已知限制与未做的事
 
-- **FOMC 直采未实现。** 只有 CPI/NFP 轮询。FOMC 规则只能被中继推文触发，且需要 `ctx.fomc_expected_bps`，当前没有任何代码注入它。
+- **不能按事件类型区分持仓。** NewsLiquid 只给分数和方向，不给"这是黑客 / 关税 / 财报"的类型，所有新闻共用 `nl_news` / `nl_news_stock` 两个模板。旧版能给 CPI 30 分钟、黑客 90 分钟、财报 2 小时，现在只有宏观直采还能这样。
+- **评分的准确率没有独立验证。** NewsLiquid 公布的准确率和延迟都是自报的。paper 阶段就是在测它。
+- **没有逐币评分的条目，多资产时不交易。** 免费热榜就是这种形状；按 NewsLiquid 文档，实时推送和 REST 都带逐币评分，所以影响应该很小，但要在实盘数据里确认（看 `classifications.reason` 里有多少 `item rating not applied`）。
+- **覆盖面跟着 NewsLiquid 走。** 它的 55 个新闻源里没有日经、华尔街见闻、财联社；东芝 HDD 那类只在日经首发的股票新闻可能收不到，或者要等转述。
+- **延迟取决于套餐。** 非 Max 套餐走 REST，平均多等 7.5 秒；AI 评分本身的延迟还没测过（`raw.nl_first_seen_ms` / `nl_rated_ms` 会记录）。
+- **依赖第三方服务。** NewsLiquid 停服、改字段或改价，新闻输入就断；`feed` 报警会通知，宏观直采和上币探测不受影响。额度的计量单位也没有公开文档说清楚，见第 15 节。
+- **FOMC 直采未实现。** 美联储决议只作为 NewsLiquid 新闻进来。
 - **止盈是单目标全平。** 没有分批、没有移保本。
-- **单消费者。** 开 LLM 后新闻风暴会堆队列。
 - **行情是 2 秒 REST 轮询**，不是 WebSocket。止损判断滞后最多 2 秒 + RTT。
 - **paper 滑点模型偏乐观。** 它按当前静态盘口算，没有模拟新闻瞬间的撤单。
-- **时效过滤按源配置**（`feeds.max_age_by_source`），再按事件类配置（`templates.*.max_news_age_s`）；两层都没写的源用 `feeds.max_age_s`。
 - **周末 HIP-3 没有特殊模板。** 第二部分 B2.4 节的"周末缺口"策略还没写。
-- **EDGAR / PR Newswire 源没接。** 财报类目前只能靠 Tree of Alpha 转发的通讯社博客。
 - **回测器只覆盖 BTC/ETH。** HIP-3 标的没有免费的分钟级历史。
-- **`classifier.llm.min_confidence`** 配置项当前未使用。Hyperliquid builder code 也没有接（SDK 支持，需要在 `order()` 调用里传 `builder=`）。
-- **规则主要是英文正则。** 行业供给规则覆盖了中文和日文厂商名与扩产/减产措辞；其他类对中文标题仍大多判噪音。Upbit/Bithumb 韩文公告只匹配了 "상장"（上币）一个词。
+- **Hyperliquid builder code 没有接**（SDK 支持，需要在 `order()` 调用里传 `builder=`）。
 
 ---
 
 ## 13. 常见问题
 
 **跑了一小时什么都没发生，正常吗？**
-正常。过去一周 2,597 条新闻 0 条触发。看 `data/hlnews.log` 里有没有 `treeofalpha connected` 和 `macro schedule loaded`，有就是在工作。用 `sqlite3 data/hlnews.db "select count(*) from news"` 确认新闻在进。
+正常。默认门槛 80 分，2026-10-28 那一天的热榜里只有 1 条 news 引擎的条目到 80 分，而且因为同时标了多个资产没有交易。看 `data/hlnews.log` 里有没有 `NewsLiquid WS subscribed`（或者 REST 在轮询、没有报错）和 `macro schedule loaded`；用 `sqlite3 data/hlnews.db "select count(*) from news where source='newsliquid'"` 确认新闻在进。
 
-**日志里一直 `waiting for corroboration`，然后就没了？**
-这类事件需要第二个独立来源在 90 秒内报同一方向。只有一个来源说明要么是小事，要么首发账号不在可信名单。如果你确认这个账号可靠，加进 `trusted_accounts`。
+**日志里有 `NewsLiquid WebSocket refused (401)`？**
+两种可能：token 无效（REST 也会报 `auth_fail`），或者套餐不含实时推送（REST 正常在跑）。`auto` 模式下后者不用管，30 分钟后会再试一次 WS；确定没有 Max 套餐，可以把 `transport` 改成 `rest`。
 
-**`REJECT ... confidence 0.60 < 0.8` 很多？**
-非可信来源的规则命中固定 0.60。两条路：加可信账号，或开 LLM 车道让它复核（融合后最高 0.85）。
+**报警说"额度用完或被限流"？**
+REST 会暂停 10 分钟再试。按套餐调 `poll_s`（第 15 节有表），并到 MCP 页面看实际消耗。
+
+**日志里一直 `waiting for a second source`，然后就没了？**
+推特、Telegram 这类来源的单条消息要等另一个来源在窗口内同向确认。如果你确认某个来源可靠，从 `rating.require_two_sources_for` 里删掉。
+
+**很多新闻有方向，但没有信号？**
+分数没到模板门槛（默认 80）。判断都在 `classifications` 表里，第 8 节最后一条查询能列出来。
 
 **`stale/no price` 拒绝？**
 `hl.mids` 超过 15 秒没更新。看日志有没有 `allMids failed`，通常是网络或 429 限速。
 
-**回放时 `news_age` 是几百秒甚至负数？**
-回放的 `ts_ms` 是历史时间戳，和当前时间比没有意义。只有实时跑时这个数才反映真实延迟。
+**回放时 `news_age` 是几十万秒？**
+回放条目的时间戳是 NewsLiquid 的原始发布时间（或示例数据的固定时间），和当前时间比没有意义。只有实时跑时这个数才反映真实延迟。
 
 **paper 的盈亏能信吗？**
 方向和时间逻辑可以信，成交价偏乐观（见第 12 节）。把它当作"策略逻辑是否成立"的测试，不是收益预估。
 
 **为什么 CPI 的 FORECAST 没有值（`FORECAST None%`）？**
-ForexFactory 的周历只覆盖本周。如果调度器在 CPI 那一周之前就 arm 了（不会，因为 T−15 分钟才 arm），或者 FF 当周 JSON 里标题不是 "CPI y/y"（偶尔会变），共识就是空的，标题会写成 `FORECAST None%`。规则解析器对 `None` 做了专门处理，返回 `CPI mention without parsable number/consensus`，不交易。（早期版本会把后面的核心 CPI 实际值误当成共识，已修。）
+ForexFactory 的周历只覆盖本周。如果 FF 当周 JSON 里标题不是 "CPI y/y"（偶尔会变），共识就是空的，标题会写成 `FORECAST None%`。`classify_macro` 在共识缺失时返回 `CPI release without number or consensus`，不交易。
 
 **想只交易 BTC/ETH 不碰股票？**
 `universe.stocks: []`，`hyperliquid.perp_dexs: [""]`。
 
 **Mac mini 上怎么常驻？**
-`launchd` 用户代理，`KeepAlive: true`，`WorkingDirectory` 指向仓库，`ProgramArguments` 是 `.venv/bin/python -m hlnews.run`，`StandardOutPath`/`StandardErrorPath` 指向日志。环境变量用 `EnvironmentVariables` 字典传，不要写进 plist 以外的地方。
+`launchd` 用户代理，`KeepAlive: true`，`WorkingDirectory` 指向仓库，`ProgramArguments` 是 `.venv/bin/python -m hlnews.run`，`StandardOutPath`/`StandardErrorPath` 指向日志。`OPENNEWS_TOKEN` 等环境变量用 `EnvironmentVariables` 字典传，不要写进 plist 以外的地方。
 
 ---
 
 # 第二部分：Hyperliquid 新闻交易永续合约 bot：架构设计与可行性结论
 
 > 2026-10-01 · 对象：BTC / ETH 永续 + trade.xyz 股票永续（TSLA、NVDA、MU 等）· 新闻源以免费为主 · Python · Mac mini M2 常驻。本部分是设计文档全文，章节号加 B 前缀以区别于第一部分。
+
+> **2026-10-28 注：** 本部分是 2026-10-01 的原始设计。B3 里的免费源方案、B4.1–B4.3（采集、去重与佐证、双车道分类）描述的自建爬虫和规则 / LLM 分类器已被 NewsLiquid 取代，见第一部分第 4 节和第 15 节；B5 的事件类模板已合并为 `nl_news` / `nl_news_stock`（第 6 节）。延迟证据、风控、执行、最小资金和验证路线仍然适用。
 
 ## B0. 先说结论
 
@@ -1288,6 +1294,8 @@ trade.xyz 文档：[Oracle price](https://docs.trade.xyz/perpetuals/mechanics/or
 - **`hlnews/ui.py`**：一个只绑 127.0.0.1 的本地 HTTP 服务，读 SQLite、`data/state.json`（bot 每 2 秒写一次的心跳）和日志，能启停 bot 子进程、跑回放、跑回测、改 `config.yaml`。前端是一个单文件页面 `hlnews/ui_static/index.html`，无外部依赖。
 - **`macos/`**：一个 SwiftUI 壳，启动时拉起上面的服务并在窗口里用 WKWebView 打开它，退出时先停 bot（会平仓）再停服务。它不含任何业务逻辑，只是让这件事看起来像一个 Mac 应用，并把 `.env` 里的密钥传给 bot 进程。
 
+它和 NewsLiquid 自己的后台（app.newsliquid.com/mcp，看 token、额度、调用日志、计费规则、订单）分工不同：那边管账户和额度，这边管 bot 拿这些新闻做了什么。额度只能在 NewsLiquid 后台看。
+
 ### 直接用浏览器
 
 ```bash
@@ -1298,14 +1306,14 @@ python -m hlnews.ui            # 打印 http://127.0.0.1:8765
 
 | 页面 | 看什么 | 能做什么 |
 |---|---|---|
-| 总览 | 一句话状态（运行/模式/权益/今日盈亏/最近新闻）、熔断或价格源停更的提示、最近 8 条决策、24 小时权益曲线、持仓及浮动盈亏、按事件类的累计、拒绝原因分布、各新闻源的延迟 | 只读 |
-| 新闻与决策 | 每条新闻一行：先写 bot 的判断（方向、标的、置信），再写新闻。点开看两条车道的理由、模板、风控结论、成交与盈亏 | 过滤、只看有方向的、翻更早的 |
-| 控制与配置 | 进程状态、环境变量是否就绪、日志尾部 | 启停 bot、跑回放、改常用参数（单笔风险、日亏熔断、持仓数、总杠杆、LLM 开关、模式）、改事件模板、改可信账号、编辑整个 config.yaml（保存前校验 YAML，旧文件备份为 `.bak`） |
+| 总览 | 一句话状态（运行/模式/权益/今日盈亏/最近新闻）、熔断或价格源停更的提示、最近 8 条决策、24 小时权益曲线、持仓及浮动盈亏、按事件类的累计、拒绝原因分布、各新闻来源（NewsLiquid 的 newsType）的条目量和延迟 | 只读 |
+| 新闻与决策 | 每条新闻一行：先写 bot 的判断（方向、标的、NewsLiquid 评分），再写新闻。点开看评分理由（逐币方向和分数）、模板、风控结论、成交与盈亏 | 过滤、只看有方向的、翻更早的 |
+| 控制与配置 | 进程状态、环境变量是否就绪（`OPENNEWS_TOKEN` 没设会标红）、日志尾部 | 启停 bot、跑回放、改常用参数（单笔风险、日亏熔断、持仓数、总杠杆、NewsLiquid 最低分、NewsLiquid 传输方式、模式）、改事件模板（门槛就是评分 / 100）、改"需要二源佐证的来源"名单、编辑整个 config.yaml（保存前校验 YAML，旧文件备份为 `.bak`） |
 | 回测 | 入场延迟扫描、按事件类统计、逐笔 | 选事件文件、设延迟、运行 |
 
-所有写操作只改 `config.yaml`，bot 要重启才生效（页面上会提示）。"启动 bot（纸面）"永远加 `--paper`，不管配置里写什么；"按配置启动"在 `mode: live` 且环境变量缺失时是禁用的。
+所有写操作只改 `config.yaml`，bot 要重启才生效（页面上会提示）。"启动 bot（纸面）"永远加 `--paper`，不管配置里写什么；"按配置启动"在 `mode: live` 且环境变量缺失时是禁用的。数据库里旧版规则车道留下的行（事件类 hack_exploit 等、lane rules/llm/fused）照常显示。
 
-API 一览（都是 JSON，便于你自己接别的东西）：`GET /api/state /api/summary /api/tape /api/positions /api/equity /api/log /api/config /api/oneshot /api/backtest`，`POST /api/bot/start /api/bot/stop /api/replay /api/backtest /api/config/text /api/config/patch`。
+API 一览（都是 JSON，便于你自己接别的东西）：`GET /api/state /api/summary /api/tape /api/positions /api/equity /api/log /api/config /api/oneshot /api/backtest /api/alerts`，`POST /api/bot/start /api/bot/stop /api/replay /api/backtest /api/config/text /api/config/patch`。
 
 ### macOS 应用
 
@@ -1319,7 +1327,7 @@ open build/HLNewsBot.app
 
 第一次打开时它会向上查找包含 `config.yaml` 的目录当作仓库（从 `macos/build/` 往上两级正好是仓库根），Python 解释器优先用仓库下的 `.venv/bin/python`。找不到时窗口里会说明，用菜单「服务 › 选择仓库目录 / 选择 Python 解释器」指定；设置在 UserDefaults 里记住。
 
-密钥：把 `HL_AGENT_KEY`、`HL_ACCOUNT`（以及可选的 `ANTHROPIC_API_KEY`）写进仓库根的 `.env`（见 `.env.example`），应用启动服务时读取并传给 bot 进程。`.env` 在 `.gitignore` 里。
+密钥：把 `OPENNEWS_TOKEN`（NewsLiquid，新闻来源，必需）以及实盘用的 `HL_AGENT_KEY`、`HL_ACCOUNT` 写进仓库根的 `.env`（见 `.env.example`），应用启动服务时读取全部键值并传给 bot 进程。`.env` 在 `.gitignore` 里。
 
 退出顺序：关窗口或 Cmd-Q → 应用给 Python 服务发 SIGINT → 服务的 `finally` 给 bot 进程组发 SIGINT → bot 的 `engine.shutdown()` 平掉所有持仓 → 服务退出 → 应用退出。整个过程最多等 20 秒。
 
@@ -1331,6 +1339,7 @@ open build/HLNewsBot.app
 flowchart LR
     APP[HLNewsBot.app<br/>SwiftUI + WKWebView] -->|启动 / SIGINT| UI[python -m hlnews.ui<br/>127.0.0.1:8765]
     UI -->|Popen / SIGINT| BOT[python -m hlnews.run]
+    NL[NewsLiquid<br/>WS / REST] -->|新闻 + 评分| BOT
     BOT -->|写| DB[(data/hlnews.db)]
     BOT -->|每 2 秒| ST[data/state.json]
     BOT -->|追加| LOG[data/hlnews.log]
@@ -1343,138 +1352,72 @@ flowchart LR
 
 服务对数据库是只读连接（`mode=ro`），所以它和 bot 不会互相写坏；唯一的互斥是"回放"：它和 bot 写同一个库，所以 bot 在跑时回放按钮是禁用的。
 
-## 15. 行业供给车道与关键新闻报警：东芝 HDD 案例
+## 15. NewsLiquid：接入、套餐与额度、迁移说明
 
-2026-10-01 21:59 UTC，日经英文版报道东芝将投资 600 亿日元把 HDD 产能翻倍。次日 STX 盘中 −12%～−16%，WDC −10%。用这条新闻检验系统，暴露了三个缺口，这一节记录缺口、补法和实测。
+### 它是什么
 
-### 当时发生了什么
+NewsLiquid 是 6551 团队的新闻交易终端，数据接口叫 OpenNews（`https://ai.6551.io`）。按 [opennews-mcp](https://github.com/6551Team/opennews-mcp) 的 README，来源 85 个，分 6 个引擎：
 
-| 时间 (UTC) | 事件 | 来源 |
-|---|---|---|
-| 10-01 20:00 | 日本経済新聞 早报：東芝、HDD供給倍増へ600億円投資 | Google News RSS（ja） |
-| 10-01 21:59 | Nikkei Asia 英文稿 | Google News RSS |
-| 10-02 01:41 / 02:11 | digitimes、Investing.com 转述 | Google News RSS |
-| 10-02 06:19 | TrendForce | Google News RSS |
-| 10-02 10:50–11:14 | **xyz:WDC 永续第一波 −5.9%**（449 → 423），美东 06:50 盘前 | Hyperliquid 5 分钟 K |
-| 10-02 10:53 | Newsquawk 推送 | Google News RSS |
-| 10-02 11:10 | 华尔街见闻："希捷盘前跌超 7%，西部数据跌 8%，有报道称东芝…" | 见闻 lives API |
-| 10-02 13:25–14:50 | 开盘第二波，WDC 跌到 398.75，全天 −13.4%（从 461） | Hyperliquid 5 分钟 K |
-
-日经英文稿发布后的 12.8 小时里，WDC 永续从 461 只漂到 448（−2.8%），成交 3,423 笔。信息公开了半天，价格没有反应，直到美股盘前的 squawk 把它推给交易员。按模板（止损 3%、止盈 5%）回放各时点做空 WDC：日经稿、digitimes、Investing.com、TrendForce 四个入场点全部在 11:00 UTC 止盈，到 15:00 的无管理收益 +13%；Newsquawk 时点 +10.4%；见闻时点 +6.3%。
-
-Tree of Alpha 过去 164 小时的 2,566 条里没有这条新闻，唯一命中 "STX" 的是 Stacks 代币的推文。它是加密源，不覆盖日经类股票报道。
-
-### 三个缺口和补法
-
-**覆盖。** 新增两个源：`google_news_feed`（按查询词轮询 Google News RSS，每 90 秒，发布方时间戳在 pubDate；免费无 key）和 `wallstreetcn_feed`（华尔街见闻 7x24 中文快讯，每 60 秒）。配置在 `feeds.google_news.queries`，每个查询一次 HTTP 请求，保持具体。Google 有时在发布 1–2 小时后才收录，所以 `feeds.max_age_by_source` 给 google_news 3 小时、见闻 1 小时，而 Tree of Alpha 仍是 20 秒。
-
-**映射。** 新增 `classify_sector`：配置 `sectors` 里每个行业有 `makers`（中英日厂商名）、`tickers`（该行业在 HL 上可交易的同业）、`actor_ticker`（厂商名→自己的永续，用于把行为主体从同业里排除）、`product_words`（产品词）。规则：标题提到某行业的厂商 + 扩产措辞（double/expand/boost … capacity/production/output/supply、new plant、扩产/产能翻倍/增产、増産/倍増）→ `supply_expansion`，同业做空；减产措辞（cut/halt/idle … production、plant fire/outage、减产/停产、減産/工場火災）→ `supply_cut`，同业做多。行为主体 = 和扩产动词在同一从句里、动词之前的厂商（"SK Hynix and Samsung to expand" 两个都是主体；"Seagate falls as Toshiba plans to double" 里 "as" 开新从句，Toshiba 是主体；"XX shares fall" 是价格反应不是主体）。主体若自己可交易则排除（"Western Digital to expand" 只剩主体，返回无方向）。置信：产品词 + 可信出版方 0.80，产品词 0.70，仅厂商名 0.60。否认措辞（denies / 否认 / rumour）直接跳过。
-
-**范围与报警。** `universe.stocks` 加入 xyz:WDC、xyz:SNDK、xyz:SKHX（STX 不在 Hyperliquid 上）。模板多了两个开关：`alert: true` 让该类的信号在过门槛时推送报警，`trade: false` 让它只报警不交易。`supply_expansion` / `supply_cut` 默认 `alert: true, trade: false`，持有 18 小时（必须跨过下一个美股交易时段）、止损 3%、止盈 5%、新闻新鲜度上限 4 小时。报警模块 `hlnews/alerts.py` 永远写 `alerts` 表和日志，可选 Telegram（Bot API `sendMessage`，环境变量 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`）和 macOS 通知（`osascript`）。同一（事件类、标的、方向）6 小时内只报一次，日经稿之后的十家转述只落库不推送。
-
-还有两处顺带改动。`classifier.rules.strong_publishers`（Nikkei Asia、日本経済新聞、Reuters、Bloomberg、digitimes、TrendForce、华尔街见闻等）在任何传输层上都算可信来源：免二源佐证，置信走 0.80 档。各事件类新增 `max_news_age_s`：宏观 120 秒、黑客/ETF/关税 600 秒、财报 1800 秒、同业供给 14400 秒，避免一条两小时前的黑客新闻走进 90 分钟持仓的模板。中文标题的去重指纹改为前 24 个汉字 + 文中数字。
-
-### 实测
-
-`data/replay_toshiba.jsonl` 是这个事件的 8 条真实标题（日经日文/英文、digitimes、Investing.com、TrendForce、见闻中文、IBD 反应稿、Stacks 推文）。默认配置回放：
-
-```
-ALERT [key_news] supply_expansion short xyz:WDC | Toshiba to double hard disk drive supply to fill AI chip memory gap
-      来源 Nikkei Asia · 置信 0.80 · hdd: toshiba expands capacity -> peers short （仅报警，模板 trade: false）
-```
-
-一次报警，来自第一条可信出版方的稿子；后面 5 条同事件转述被去重；IBD 的"股价下跌"反应稿和 Stacks 推文判为噪音。把 `supply_expansion` 的 `trade` 改成 true 再回放，会在 xyz:WDC 上开出纸面空单（10x 逐仓标的，模板杠杆上限 2x，名义 = 权益 × 0.5% ÷ 3%）。原来的 14 条回放样本逐行结果不变。
-
-实时跑 75 秒：Google News 源在基线之后又收到两篇关于东芝/WDC 的新文章（发布时间 1.5–1.9 小时前，Google 迟收录），说明这个源确实在工作，也说明为什么它的时效要放宽。
-
-### 这类新闻该怎么用
-
-这个案例的边际不在速度：信息公开 13 小时后价格才动。边际在两件事上，一是覆盖了加密源不碰的出版方，二是把"东芝扩产"翻译成"WDC 利空"这一步映射。所以模板设成 18 小时持有、`trade: false`。建议先让它报警一个季度，看 `alerts` 表里 `supply_*` 的信号在随后一个交易日的方向正确率，够了再开 `trade: true`。`sectors` 里目前只有 HDD 和存储两个行业，加行业只需要在 config 里加一组厂商名和标的。
-
-## 16. 金十数据：接口现状与接入
-
-金十没有公开文档的免费 API。2026-10-03 核实到三条路：
-
-| 路径 | 地址 | 鉴权 | 状态 |
+| 引擎 | 数量 | 内容 | bot 怎么用 |
 |---|---|---|---|
-| 网页用的快讯接口（**采用**） | REST `https://flash-api.jin10.com/get_flash_list?channel=-8200&vip=1[&max_time=…]` + WebSocket `wss://wss-flash-2.jin10.com/` | REST 请求头 `x-app-id: bVBF4FyRTn5NJF5n`、`x-version: 1.0.0`（前端公开值）；WS 匿名登录 | 可用。REST 20 条/页约 0.15 秒、`max_time` 翻页、只保留约 10 天、连发 12 次无限流；WS 推送延迟 0.0–0.3 秒（实测）。未文档化，akshare 的 `js_news` 用的是同一 REST，字段可能变 |
-| 金十开放平台（商用） | `https://open-data-api.jin10.com/data-api/{flash,v2/flash,calendar/data,calendar/event,news,symbols,quotes}` | 请求头 `secret-key`，登录 open.jin10.com 后在"订单/套餐"页购买，有 Python/Go/Java/Node/C++ demo | 价格登录后可见，未公开 |
-| 金十智能开放平台（MCP） | `https://mcp.jin10.com/mcp`，Bearer token（登录金十账号→激活→复制） | 工具 `list_flash`、`search_flash`、`list_news`、`get_quote`、`get_kline` | 面向 AI 应用；轮询不如 REST 顺手 |
+| news | 55 | Bloomberg、Reuters、FT、CNBC、CoinDesk、The Block、金十、BWEnews、推特 KOL、Truth Social、美国财政部、欧央行、新闻稿等 | 默认订阅；`nl_news` / `nl_news_stock` 交易 |
+| listing | 9 | Binance、Coinbase、OKX、Bybit、Upbit、Bithumb、Robinhood、Hyperliquid、Aster 的上币公告 | 默认订阅；`nl_listing` 只报警 |
+| onchain | 2 | Hyperliquid 大额成交、大额持仓 | 默认不订阅 |
+| market | 6 | 价格异动、资金费率、跨所费率差、大额爆仓、趋势、持仓量 | 默认不订阅 |
+| meme | 1 | 推特上的 meme 币讨论 | 默认不订阅 |
+| prediction | 12 | AI 预测与关联信号（聪明钱、巨鲸、内幕模式、结算套利等） | 默认不订阅 |
 
-财经日历的老 CDN（`cdn-rili.jin10.com/web_data/…/economics.json`）域名已不解析。
+每条带 `aiRating`（score 0–100、grade、signal long / short / neutral、中英文摘要）；`coins[]` 里每个币有自己的 score / signal / grade，顶层 score 是所有币里的最高分。
 
-### 为什么值得接
+### 注册、token、购买
 
-两个实测数字。东芝那条，金十在 **10-01 22:23:34 UTC** 发了"市场消息：东芝将投资600亿日元，把硬盘（HDD）供应能力翻倍"，比日经英文稿晚 24 分钟，比 WDC 永续第一波早 12.5 小时，比华尔街见闻早 13 小时。10-02 的非农，BLS 12:30:00 UTC 发布，金十的**结构化数据条目**（`type=1`，含 actual / consensus / previous / star / 英文名）12:30:02–04 到达，文字快讯 12:30:04–06。这和直接轮询 bls.gov 是同一个速度档，但覆盖全球所有宏观数据并自带预期值。
+在 app.newsliquid.com/mcp（文档里也写作 6551.io/mcp）：
 
-### 接法
+1. **登录 / 注册**：Google 账号，或者钱包（EVM 钱包如 MetaMask，Solana 钱包如 Phantom；钱包登录要过 Cloudflare 人机验证）。注册时可以填邀请码。没有邮箱密码登录。
+2. **创建 token**：同一页面创建（要过人机验证）、复制，放进 `.env` 的 `OPENNEWS_TOKEN`。页面上的"刷新"会换一个新 token，旧的随即失效。
+3. **购买**：升级到订阅套餐（按月或按年，按年有折扣），默认用加密货币付款（填邮箱后跳到付款页），也可以取消勾选，改用页面给出的付款二维码 / 链接；或者一次性购买积分（1 USDT = 500 积分，买的积分不过期）；也可以兑换礼品卡。
+4. **看用量**：同一页面有额度卡片（套餐积分及重置日期、免费每日额度、购买的积分）、调用日志（每次调用的时间、接口、参数、扣了多少）、计费规则（每个接口怎么扣），以及订单和发票。
 
-`jin10_feed`（`hlnews/feeds.py`）WebSocket 推送优先，REST 每 10 秒兜底，两路共用一个 id 去重集合；WS 断线时自然退化为 10 秒轮询，恢复后自动接管，并通过 `feed` 类报警通知"数据源 ws_down / 恢复"。
+### 套餐与额度
 
-WS 协议是从前端 JS 读出来的：裸 WebSocket；服务端第一帧是 4 个 uint32 LE，第二、第三个拼成异或密钥 `"{third}.{second}"`；之后每一帧按字节与密钥循环异或（偏移为密钥首字符的码值）；帧 = int16 LE 操作码 + 载荷。客户端连上后发 4002 登录帧（user_id 0、空 token、浏览器名、等级 0、"web"），服务端回 `{"status":101,"message":"visitor login success."}`；1200 是最近 40 条列表（int32 条数 + 每条 uint16 长度前缀的 UTF-8 JSON + int32 是否全量），只用作基线，重连后比已见最新时间更新的条目才算漏掉的新闻；1000/1010/1100 是单条快讯 JSON，`action` 1 新增 / 2 修改 / 3 删除，只取新增；1201 心跳约 10 秒一次，回一个空文本帧；1005 置顶列表忽略。条目字段与 REST 完全一致。`type=0` 文字快讯去掉 `<b>` 后原样进管线（中文，行业供给规则能读）。`type=1` 数据条目用 `jin10_squawk` 拼成现有宏观规则认得的英文 squawk 行：
+创始人 2026-03-10 公布的价格（以 MCP 页面为准）：
 
-```
-US Nonfarm Payroll Employment (9月) ACTUAL 29K (FORECAST 90K; PREVIOUS 162K)   ← 万人 ×10 → K
-US CPI YoY (Sep) ACTUAL 3.1% (FORECAST 2.9%; PREVIOUS 2.9%)
-```
-
-规则输出 `macro_nfp long 0.80（NFP 29k vs cons 90k）`、`macro_cpi short 0.85`。`type=2`（文章导流）跳过。配置：
-
-```yaml
-feeds:
-  jin10: {enabled: true, poll_s: 3, types: [0, 1]}
-  max_age_by_source: {jin10: 900}
-```
-
-```yaml
-feeds:
-  jin10: {enabled: true, ws: true, ws_url: wss://wss-flash-2.jin10.com/, poll_s: 5, fast_poll_s: 2, types: [0, 1]}
-```
-
-"金十数据"已加入 `strong_publishers`。若买了开放平台，把 `feeds.jin10.url` 指到 `open-data-api.jin10.com/data-api/flash`、`headers` 填 `secret-key`、`ws: false` 即可，解析逻辑不变。
-
-### 注意
-
-每天约 880 条快讯都会过一遍规则（<1 ms/条）并落库；若同时开 LLM 慢车道，规则判噪音的中文快讯会全部送去 LLM，Haiku 约 $0.3–0.5/天，可在 `classifier.llm` 里按需关掉或将来加按源过滤。金十的 `type=1` 条目时间是它自己的入库时间，比源晚 2–4 秒；WS 推送把轮询间隔去掉了，宏观数据端到端约 2–5 秒。全源联跑实测（2026-10-03）：三条金十快讯的发布时间到本机接收分别为 0.0、0.2、0.3 秒。免费接口随时可能改字段或协议：REST 变了 `jin10_squawk` 对缺字段返回 `None` 跳过；WS 握手或帧格式变了会走重连退避并由 REST 兜底，进程不会挂。
-
-## 17. 财联社接入与轮询分层（热窗口）
-
-### 财联社
-
-财联社没有公开 API，旧的 `nodeapi/updateTelegraphList`、`nodeapi/telegraphList` 都已 404。现在网页前端用的是签名接口：
-
-```
-GET https://www.cls.cn/v1/roll/get_roll_list?app=CailianpressWeb&os=web&sv=8.4.6&category=&refresh_type=1&rn=20&last_time=&sign=…
-sign = md5(sha1(按 key 排序后的 querystring))
-```
-
-无需登录，0.2–0.3 秒一页 20 条，`last_time` 翻页可回溯数天，约 360 条/天，`level` B 为加红要闻（约 11%）。前端 JS 里没有任何 WebSocket，网页本身就是轮询，所以轮询已是该源的上限。
-
-两组实测定位它的价值：10-02 非农，财联社文字稿 `ctime` 12:30:13，比 BLS 发布晚 13 秒（这是编辑部延迟，轮询再快也只能逼近它；金十结构化条目是 +2–4 秒）；东芝 HDD 原始消息它完全没发，只在 11:04 UTC 发了"希捷西数盘前跳水"的反应稿。所以它的角色是金十/见闻的**冗余源**和 A 股/中国公司新闻的补充，不是延迟源。`cls_feed` 已接入（`feeds.cls`），"财联社"加入 `strong_publishers`，二源佐证时和金十互为独立来源。
-
-顺带修了一个它暴露的真问题：`【美股盘前要闻一览】`这类汇总稿会把十几小时前的东芝旧闻再触发一次行业供给信号。`classify_sector` 现在对标题前 60 字符出现"要闻一览/汇总/早报/盘前瞻/复盘/roundup/recap"等措辞的条目直接跳过。
-
-### 轮询分层与热窗口
-
-"每秒实时爬取"对不同源的意义不同：Tree of Alpha 和金十是 WS 推送（0–0.3 秒），没有轮询间隔可省；财联社/见闻的瓶颈分两段，编辑部延迟（财联社 NFP +13 秒）轮询无法改变，轮询间隔那一段才是可以压的。全天 1 秒轮询则是无谓的封禁风险（财联社 1 秒 = 8.6 万请求/天）。
-
-所以采用两档：**平时适度，热窗口 1 秒**。
-
-| 源 | 平时 | 热窗口 | 依据 |
+| 套餐 | 价格 | 额度 | 建议配置 |
 |---|---|---|---|
-| 财联社 | 3 s | **1 s** | 25 req @ 1 Hz 实测全 200、RTT 0.26 s；3 s 档约 2.9 万请求/天，若开始报错就调大 |
-| 华尔街见闻 | 15 s | 5 s | cursor 接口较重，未测更高频 |
-| 金十 REST（WS 兜底） | 5 s | 2 s | WS 为主，REST 只是保险 |
-| Google News / HL 上币 / 行情 | 不变 | 不变 | Google 高频必 429；HL 受 IP 权重限制（1,200/分钟） |
+| Free | 0 | 每天 100 条 | 只够验证：`transport: rest`、`poll_s: 900` |
+| Plus | 1.9U | 2 万条 | `transport: rest`、`poll_s: 180`（约 14,400 次 / 30 天） |
+| Pro | 29U | 20 万条 | `transport: rest`、`poll_s: 15`（默认，约 17.3 万次 / 30 天） |
+| Max | 99U / 月 | 新闻 + 推特实时 WebSocket | `transport: auto` 或 `ws` |
 
-热窗口（`feeds.set_hot`）由两处触发：宏观调度器在发布前 30 秒拉起 300 秒（覆盖 BLS 直采失败时从中继源抢数字的窗口）；引擎在**任何方向性标题**出现时拉起 120 秒——这一下所有轮询源提速，等第二来源佐证的时间也随之缩短。实跑中已验证：一条东芝相关的方向性标题到达后日志出现 `hot window until +120s`，财联社随即切到 1 秒轮询。
+**额度单位没有公开文档讲清楚。** README 写"每次 REST/MCP 调用消耗 1 个额度"；MCP 页面把额度显示成积分（免费每天 5 积分 ≈ 100 条，1 USDT = 500 积分）；推文也没说 Plus / Pro 是一次性还是按月。上表按"1 次调用 = 1 条"估算。拿到 token 后先跑 10 分钟，到 MCP 页面的调用日志和计费规则核对每次 `news_search` 实际扣多少，再调 `poll_s` 或选套餐。
 
-```yaml
-feeds:
-  cls:          {enabled: true, poll_s: 3,  fast_poll_s: 1}
-  wallstreetcn: {enabled: true, poll_s: 15, fast_poll_s: 5}
-  jin10:        {enabled: true, ws: true, poll_s: 5, fast_poll_s: 2, types: [0, 1]}
-```
+除了按 `poll_s` 的固定轮询，REST 还有几处额外消耗：突发时多读的分页；等第二来源时的热窗口（5 秒一轮，最长 2 分钟）；宏观发布前后的热窗口（5 秒一轮，5 分钟）；WS 每次（重新）订阅后的一次补漏；WS 在线时每 5 分钟一次抽查（每天 288 次）。额度用完或被限流时，REST 暂停 10 分钟并推一条 `feed` 报警。
+
+### 迁移说明：删掉了什么、换成了什么
+
+| 旧 | 新 |
+|---|---|
+| Tree of Alpha WebSocket（推特、博客、币安公告） | NewsLiquid news（Twitter/X、BWEnews 等）+ listing |
+| 金十 WebSocket / REST | NewsLiquid news 里的 `jin10` 来源 |
+| Telegram（Telethon 用户会话） | NewsLiquid news 里的 Telegram 来源 |
+| Google News RSS、华尔街见闻、财联社 | 无直接替代（NewsLiquid 不含这三个，见第 12 节） |
+| 规则车道（CPI / NFP / FOMC / 黑客 / ETF / 关税 / 特朗普 / 财报 / 行业供给的正则） | NewsLiquid 评分；CPI / NFP 改为直接用 BLS 数字做减法 |
+| LLM 慢车道（Anthropic / OpenAI） | 删除（NewsLiquid 本身就是 AI 评分） |
+| 可信账号、强出版方（单一来源也可直接交易的白名单） | `rating.require_two_sources_for`（反过来：列出必须二源确认的来源） |
+| 行业供给车道（东芝 HDD 案例）、`sectors` 配置 | 删除；同类新闻由 NewsLiquid 标到 `XYZ-WDC` 等标签 |
+| 17 个事件类模板 | `macro_cpi`、`macro_nfp`、`listing_hl`、`nl_news`、`nl_news_stock`、`nl_listing` |
+| `ticker_aliases`（自由文本 → 合约） | `symbol_map`（只在标签和合约名对不上时用） |
+| `data/replay_toshiba.jsonl` | 删除；`data/replay.jsonl` 换成 NewsLiquid 真实条目 |
+
+旧代码和文档在提交 `b5b75c0` 及之前，比如 `git show b5b75c0:hlnews/feeds.py`、`git show b5b75c0:README.md`（原第 15–17 节记录了东芝 HDD、金十协议、财联社签名的实测）。数据库不用迁移：表结构没变，旧行照常显示。
+
+### 实测（2026-10-28）
+
+- 免费热榜接口 `GET /open/free_hot?category=…`（不要 token）取 web3 / macro / ai 三类各 50 条，去重后 118 条：72 条 news 引擎、46 条 meme 引擎；分数 62–85，中位数 72；66 条带 universe 内的币种。
+- 股票标签：universe 内 11 只股票的标签出现 123 次，60 次同时带纯代码和 `XYZ-` 前缀，63 次只有 `XYZ-`，没有一次只有纯代码。
+- 无 token / 无效 token：REST 401（`missing Authorization header` / `invalid token`），WS 握手 401 `unauthorized`；`auto` 模式依次报 `ws_refused`、`auth_fail`。
+- `data/replay.jsonl` 用真实主网价格跑完整管线，结果见第 2 节。
+- 有了 token 以后建议第一件事：跑 10 分钟，`select count(*), round(avg(age_s),1) from news where source='newsliquid'` 看条目量和延迟；到 MCP 页面看额度消耗。
 
 ---
 

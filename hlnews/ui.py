@@ -94,7 +94,7 @@ class BotProcess:
             "oneshot": {"kind": self.oneshot_kind, "running": self.oneshot is not None and self.oneshot.poll() is None,
                         "started_ms": self.oneshot_started_ms} if self.oneshot_kind else None,
             "env": {"HL_AGENT_KEY": bool(os.environ.get("HL_AGENT_KEY")), "HL_ACCOUNT": bool(os.environ.get("HL_ACCOUNT")),
-                    "ANTHROPIC_API_KEY": bool(os.environ.get("ANTHROPIC_API_KEY")), "OPENAI_API_KEY": bool(os.environ.get("OPENAI_API_KEY"))},
+                    "OPENNEWS_TOKEN": bool(os.environ.get("OPENNEWS_TOKEN"))},
             "python": self.python, "repo": self.repo,
         }
 
@@ -281,7 +281,7 @@ class Data:
         if f["direction"] == "none":
             return "无方向"
         if not r["signals"]:
-            return "等待佐证或无模板"
+            return "未达门槛 / 等待第二来源 / 无模板"
         for s in r["signals"]:
             if s.get("position"):
                 p = s["position"]
@@ -357,7 +357,7 @@ class Data:
             parsed = yaml.safe_load(text)
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": f"YAML 解析失败：{e}"}
-        for k in ("mode", "hyperliquid", "account", "universe", "feeds", "classifier", "templates", "storage"):
+        for k in ("mode", "hyperliquid", "account", "universe", "feeds", "rating", "templates", "storage"):
             if k not in parsed:
                 return {"ok": False, "error": f"缺少顶层键 {k}"}
         bak = self.cfg_path + ".bak"
@@ -372,8 +372,8 @@ class Data:
 
     def patch_config(self, patch: dict) -> dict:
         """Apply a shallow set of edits to config.yaml by rewriting scalar lines in place so comments survive.
-        Supported keys: mode, account.*, classifier.llm.enabled, classifier.llm.model, templates.<class>.<field>,
-        feeds.<name>.enabled, hyperliquid.network, classifier.rules.trusted_accounts (list)."""
+        Supported keys: mode, account.*, rating.min_score, feeds.newsliquid.transport, templates.<class>.<field>,
+        feeds.<name>.enabled, hyperliquid.network, rating.require_two_sources_for (list)."""
         import re
 
         text = self.config_text()
@@ -421,15 +421,18 @@ class Data:
             ok = False
             if parts[0] == "templates" and len(parts) == 3:
                 ok = set_template_field(parts[1], parts[2], value)
-            elif key == "classifier.rules.trusted_accounts" and isinstance(value, list):
-                # rewrite the list block
-                start = next((i for i, l in enumerate(lines) if re.match(r"^\s{4}trusted_accounts\s*:", l)), None)
+            elif key == "rating.require_two_sources_for" and isinstance(value, list):
+                # rewrite the list block under rating: (two-space key, four-space "- item" lines)
+                start = next((i for i, l in enumerate(lines) if re.match(r"^\s{2}require_two_sources_for\s*:", l)), None)
                 if start is not None:
                     j = start + 1
-                    while j < len(lines) and (lines[j].startswith("      - ") or not lines[j].strip() or lines[j].strip().startswith("#") and lines[j].startswith("      ")):
+                    while j < len(lines) and (lines[j].startswith("    - ") or (lines[j].startswith("    ") and lines[j].strip().startswith("#"))):
                         j += 1
-                    new = [f"      - {v}" for v in value]
-                    lines[start + 1 : j] = new
+                    lines[start] = re.sub(r":.*$", ":", lines[start])     # drop any inline [] value
+                    new = [f"    - {_yaml_scalar(str(v).strip().lower())}" for v in value if str(v).strip()]
+                    lines[start + 1 : j] = new if new else []
+                    if not new:
+                        lines[start] = lines[start] + " []"
                     ok = True
             else:
                 ok = set_scalar(parts, value)

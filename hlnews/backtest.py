@@ -11,6 +11,10 @@ Usage:
 Event file: one JSON per line {ts_utc:"2025-02-21T15:20:00Z", coin:"ETH", direction:"short", event_class:"hack_exploit", note:"..."}
 Binance symbol mapping: BTC->BTCUSDT, ETH->ETHUSDT, xyz:TSLA etc are skipped (no free 1m history for the perp) unless
 a `symbol` field is given.
+
+Event classes are historical labels. When a label has no template of its own (hack_exploit, etf, tariff ... from the
+removed rules lane), the event is simulated with the NewsLiquid template the bot would use today: nl_news for crypto,
+nl_news_stock for xyz: stock perps. Output stays grouped by the historical label.
 """
 from __future__ import annotations
 
@@ -83,16 +87,27 @@ def simulate(k: list[list], side: int, entry_delay_s: int, stop_pct: float, tp_p
     return {"ret_pct": (gross - FEE_RT - SLIP_RT) * 100, "exit_reason": reason, "bars": bars, "entry": entry, "exit": exit_px}
 
 
+def template_for(ev: dict, templates: dict) -> dict | None:
+    """The event's own template, else the NewsLiquid template the bot would trade it with today."""
+    t = templates.get(ev["event_class"])
+    if t:
+        return t
+    fallback = "nl_news_stock" if str(ev.get("coin", "")).startswith("xyz:") else "nl_news"
+    return templates.get(fallback)
+
+
 def run(events: list[dict], templates: dict, delay_s: int, verbose: bool = True, rows_out: list[dict] | None = None) -> dict:
     by_class: dict[str, list[dict]] = {}
+    used: dict[str, dict] = {}
     for ev in events:
         coin = ev["coin"]
         sym = ev.get("symbol") or {"BTC": "BTCUSDT", "ETH": "ETHUSDT"}.get(coin)
         if not sym:
             continue
-        t = templates.get(ev["event_class"])
+        t = template_for(ev, templates)
         if not t:
             continue
+        used[ev["event_class"]] = t
         t0 = int(datetime.fromisoformat(ev["ts_utc"].replace("Z", "+00:00")).astimezone(timezone.utc).timestamp() * 1000)
         n_bars = int(t["hold_s"] / 60) + 8
         k = klines(sym, t0 - 60_000, min(n_bars, 1000))
@@ -113,7 +128,7 @@ def run(events: list[dict], templates: dict, delay_s: int, verbose: bool = True,
         r = [x["ret_pct"] for x in rs]
         all_r += r
         wins = sum(1 for x in r if x > 0)
-        t = templates[ec]
+        t = used[ec]
         be = float(t["stop_pct"]) / (float(t["stop_pct"]) + float(t.get("tp_pct") or t["stop_pct"]))
         out[ec] = {"n": len(r), "win_rate": wins / len(r), "mean_pct": statistics.mean(r), "median_pct": statistics.median(r),
                    "sum_R": sum(x / float(t["stop_pct"]) for x in r), "breakeven_win_rate_if_tp_or_stop": be,

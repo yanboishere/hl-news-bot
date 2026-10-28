@@ -1,5 +1,6 @@
 # hl-news-bot configuration. All money numbers in USDC.
 # mode: paper | live   (live additionally requires HL_AGENT_KEY and HL_ACCOUNT in the environment)
+# News: NewsLiquid (6551 OpenNews) collects and rates the news. Export OPENNEWS_TOKEN (https://6551.io/mcp).
 mode: paper
 
 hyperliquid:
@@ -23,173 +24,80 @@ account:
 universe:
   crypto: ["BTC", "ETH"]
   stocks: ["xyz:TSLA", "xyz:NVDA", "xyz:AAPL", "xyz:MSFT", "xyz:META", "xyz:GOOGL", "xyz:AMZN", "xyz:MU", "xyz:WDC", "xyz:SNDK", "xyz:SKHX"]
-  ticker_aliases:             # free text -> HL coin
-    bitcoin: BTC
-    btc: BTC
-    ethereum: ETH
-    eth: ETH
-    ether: ETH
-    tesla: xyz:TSLA
-    tsla: xyz:TSLA
-    nvidia: xyz:NVDA
-    nvda: xyz:NVDA
-    apple: xyz:AAPL
-    aapl: xyz:AAPL
-    microsoft: xyz:MSFT
-    msft: xyz:MSFT
-    meta: xyz:META
-    alphabet: xyz:GOOGL
-    google: xyz:GOOGL
-    googl: xyz:GOOGL
-    amazon: xyz:AMZN
-    amzn: xyz:AMZN
-    micron: xyz:MU
-    美光: xyz:MU
-    western digital: xyz:WDC
-    wdc: xyz:WDC
-    西部数据: xyz:WDC
-    sandisk: xyz:SNDK
-    sndk: xyz:SNDK
-    闪迪: xyz:SNDK
-    sk hynix: xyz:SKHX
-    hynix: xyz:SKHX
-    海力士: xyz:SKHX
-
-# Sector map for the supply rule: when a *maker* of a sector announces capacity expansion or a cut, the
-# tradeable *peers* in that sector get a direction (expansion -> short peers, cut -> long peers). The actor
-# itself is excluded (its own direction is ambiguous). Names are matched case-insensitively as whole words;
-# Chinese / Japanese names are matched as substrings.
-sectors:
-  hdd:
-    makers: ["toshiba", "東芝", "东芝", "seagate", "希捷", "シーゲイト", "western digital", "西部数据", "ウエスタンデジタル"]
-    actor_ticker: {"western digital": "xyz:WDC", "西部数据": "xyz:WDC", "ウエスタンデジタル": "xyz:WDC"}
-    tickers: ["xyz:WDC"]                 # STX is not listed on Hyperliquid (checked 2026-10-02)
-    product_words: ["hdd", "hard disk", "hard drive", "hard-disk", "hard-drive", "nearline", "硬盘", "ハードディスク"]
-  memory:
-    makers: ["micron", "美光", "マイクロン", "sk hynix", "hynix", "海力士", "samsung", "三星", "サムスン", "kioxia", "铠侠", "キオクシア", "sandisk", "闪迪", "cxmt", "长鑫", "ymtc", "长江存储", "nanya", "南亚科"]
-    actor_ticker: {"micron": "xyz:MU", "美光": "xyz:MU", "マイクロン": "xyz:MU", "sk hynix": "xyz:SKHX", "hynix": "xyz:SKHX", "海力士": "xyz:SKHX", "sandisk": "xyz:SNDK", "闪迪": "xyz:SNDK"}
-    tickers: ["xyz:MU", "xyz:SKHX", "xyz:SNDK"]
-    product_words: ["dram", "nand", "hbm", "memory chip", "flash", "存储芯片", "内存", "闪存", "メモリー", "メモリ"]
+  # NewsLiquid coin tags map to HL coins exactly: "BTC" -> BTC, "XYZ-NVDA" -> xyz:NVDA (its tag for the trade.xyz perp).
+  # Plain stock tickers ("NVDA") are ignored on purpose; NewsLiquid adds the XYZ- tag whenever it means the HL perp.
+  # Add explicit overrides here when a tag and the HL name differ, e.g. PEPE: kPEPE. All checked against the lists above.
+  symbol_map: {}
 
 feeds:
-  max_age_s: 20               # default for live feeds: items older than this on arrival are dropped
-  max_age_by_source:          # slow-diffusion sources get a longer window (the edge there is coverage, not latency)
-    treeofalpha: 20
+  max_age_s: 120              # default for sources not listed below: items older than this on arrival are dropped
+  max_age_by_source:
+    newsliquid: 1800          # publisher ts -> NewsLiquid AI rating -> us; per-template max_news_age_s decides what still trades
     hl_listings: 60
     bls_poll: 60
-    telegram: 60
-    google_news: 10800        # Google sometimes indexes 1-2 h after pubDate; per-class max_news_age_s below decides what is still actionable
-    wallstreetcn: 3600
-    jin10: 900
-    cls: 900
-  treeofalpha:
+  newsliquid:
     enabled: true
-    ws_url: wss://news.treeofalpha.com/ws
-    api_key: ""               # optional, free key from news.treeofalpha.com/account
-    max_age_s: 20             # drop anything older than this on arrival
-  telegram:
-    enabled: false            # needs api_id/api_hash + an aged user account; see README
-    api_id: 0
-    api_hash: ""
-    session: hlnews.session
-    channels: ["BWEnews", "CLWfeed", "WatcherGuru"]
+    token_env: OPENNEWS_TOKEN # the token is read from this environment variable; never write the token itself here
+    transport: auto           # auto = WebSocket push first, REST polling whenever the socket is refused or down | ws | rest
+                              # WebSocket push is a Max-plan feature (99U/month, founder's post 2026-03-10); other plans use REST
+    api_base: https://ai.6551.io
+    ws_url: wss://ai.6551.io/open/news_wss
+    engine_types:             # NewsLiquid engines to subscribe; [] = every source of that engine
+      news: []                # 55 sources: Bloomberg, Reuters, FT, CNBC, jin10, BWEnews, Twitter/X KOLs, Truth Social, ...
+      listing: []             # Binance, Coinbase, OKX, Bybit, Upbit, Bithumb, Robinhood, Hyperliquid, Aster
+    coins: []                 # optional NewsLiquid tags to restrict the stream to, e.g. ["BTC", "ETH", "XYZ-NVDA"]
+    has_coin: true            # only items NewsLiquid tagged with at least one coin
+    poll_s: 15                # REST interval: 1 quota per call -> 5,760/day, ~173k per 30 days (Pro plan: 200k)
+    fast_poll_s: 5            # REST inside a hot window: macro releases, and while a lone-source item waits for its second source
+    page_size: 50
+    max_pages: 3              # a burst (a whole page of new items) reads up to this many pages; each page is one call
+    ws_retry_s: 1800          # after a refused handshake (plan without WS) stay on REST and retry WS every 30 min
+    ws_audit_s: 300           # while WS carries the feed, one REST read this often checks the socket is not silently dropping items (0 = off)
+    backfill_on_reconnect: true
   hl_listings:
     enabled: true
     poll_s: 5                 # diff of {"type":"meta"} universe -> LISTING_HL events
   macro:
     enabled: true             # BLS schedule + ForexFactory consensus + release-second polling of bls.gov
-  google_news:
-    enabled: true             # RSS search per query; free, no key; ~1-10 min behind the publisher
-    poll_s: 90
-    queries:                  # keep these specific; each is one HTTP request per poll
-      - "Toshiba HDD"
-      - "Seagate OR \"Western Digital\" hard drive"
-      - "Micron OR \"SK Hynix\" OR Samsung DRAM capacity"
-      - "Kioxia OR SanDisk NAND"
-      - "CXMT OR YMTC memory"
-      - "Nvidia export controls OR Nvidia H20 China"
-      - "Tesla quarterly deliveries OR Tesla NHTSA recall"
-    hl: en-US
-  wallstreetcn:
-    enabled: true             # 华尔街见闻 7x24 快讯, Chinese, ~370 items/day, no key
-    poll_s: 15
-    fast_poll_s: 5            # inside a hot window (macro release / after a directional headline)
-  jin10:
-    enabled: true             # 金十数据 7x24 快讯 (~880 items/day, no key). Data releases arrive 2-4 s after the source as
-    ws: true                  # structured items and are rendered as English squawk lines for the macro rules.
-    ws_url: wss://wss-flash-2.jin10.com/     # push (the jin10.com front end's socket); REST below is the safety net
-    poll_s: 5                 # REST safety net while WS is up; also the latency floor if WS is down
-    fast_poll_s: 2
-    types: [0, 1]             # 0 = text flash, 1 = data release; 2 (articles) skipped
-  cls:
-    enabled: true             # 财联社电报 (~360 items/day, signed roll API, no key; no WS exists). Redundancy for Chinese
-    poll_s: 3                 # flashes and CN corporate news; its NFP text was +13 s (editorial floor, polling cannot beat it).
-    fast_poll_s: 1            # 25 req @ 1 Hz measured clean; ~29k req/day at 3 s idle — if cls starts failing, raise poll_s
 
-classifier:
-  llm:
-    enabled: false            # when false, only the rules lane runs (fully deterministic)
-    provider: anthropic       # anthropic | openai
-    model: claude-haiku-4-5
-    timeout_s: 4.0
-    max_tokens: 200
-    min_confidence: 0.75
-  rules:
-    trusted_accounts:         # twitter handles whose headlines bypass the "two sources" rule
-      - DeItaone
-      - FirstSquawk
-      - WatcherGuru
-      - unusual_whales
-      - CoinbaseMarkets
-      - binance
-      - Upbit_Official
-      - SECGov
-      - federalreserve
-      - BLS_gov
-      - zachxbt
-      - PeckShieldAlert
-      - CertiKAlert
-    require_two_sources_for: ["hack_exploit", "regulatory", "etf", "m_and_a", "tariff", "trump_policy", "supply_expansion", "supply_cut"]
-    corroboration_window_s: 90
-    corroboration_window_by_class:   # slow-diffusion classes: a second publisher may take an hour
-      supply_expansion: 7200
-      supply_cut: 7200
-    strong_publishers:               # items from these publishers count as a trusted source on any transport
-      - Nikkei Asia
-      - 日本経済新聞
-      - Reuters
-      - Bloomberg
-      - The Wall Street Journal
-      - Financial Times
-      - CNBC
-      - digitimes
-      - TrendForce
-      - 华尔街见闻
-      - 金十数据
-      - 财联社
+# How a NewsLiquid rating becomes a signal. The bot does not read the text; these are thresholds and source policy.
+rating:
+  min_score: 60               # ratings below this are kept on the tape but never directional
+  use_coin_rating: true       # when NewsLiquid scores a coin on its own (coins[].score / signal), use that, not the item's top score
+  # A coin with no rating of its own: single = use the item's rating only if the item is about one asset ("XYZ-NVDA" and
+  # "NVDA" count as one); all = always; none = never. The item score is NewsLiquid's maximum over coins, so on an item
+  # tagging oil, BTC and ETH it may be the oil call.
+  item_rating_fallback: single
+  # NewsLiquid newsType values (case-insensitive) that never trade alone: a second, different source must agree on
+  # (class, coin, direction) within the window. Editable in the console ("需要二源佐证的来源").
+  require_two_sources_for:
+    - twitter
+    - twitter/x
+    - x / twitter profile
+    - telegram
+    - weibo
+    - medium
+  corroboration_window_s: 90
+  corroboration_window_by_class:
+    nl_news_stock: 1800       # stock stories are re-reported over tens of minutes
 
 # Trade templates per event class. hold_s is the hard time stop. stop/tp are % of entry.
+# min_conf: for the NewsLiquid classes this is NewsLiquid's score / 100 (0.80 = score 80); for macro it is the fixed
+#           confidence of the arithmetic lane (0.85 CPI surprise, 0.80 NFP surprise); listing_hl is 0.9.
 # Optional flags: alert: true  -> push an alert when a directional signal of this class passes its min_conf
 #                 trade: false -> alert / log only, never open a position (default true)
-#                 max_news_age_s -> ignore headlines older than this for the class (fast classes need fresh news; sector news can be hours old)
+#                 max_news_age_s -> ignore items older than this for the class
 templates:
+  # first-party lanes
   macro_cpi:      {hold_s: 1800, stop_pct: 0.8,  tp_pct: 1.2,  risk_pct: 0.5,  max_lev: 3, min_conf: 0.8, max_news_age_s: 120}
   macro_nfp:      {hold_s: 3600, stop_pct: 0.9,  tp_pct: 1.2,  risk_pct: 0.4,  max_lev: 2, min_conf: 0.8, max_news_age_s: 120}
-  macro_fomc:     {hold_s: 3600, stop_pct: 1.0,  tp_pct: 1.2,  risk_pct: 0.4,  max_lev: 2, min_conf: 0.8, max_news_age_s: 180}
-  hack_exploit:   {hold_s: 5400, stop_pct: 1.5,  tp_pct: 2.5,  risk_pct: 0.8,  max_lev: 3, min_conf: 0.8, alert: true, max_news_age_s: 600}
-  depeg:          {hold_s: 5400, stop_pct: 1.5,  tp_pct: 2.5,  risk_pct: 0.6,  max_lev: 2, min_conf: 0.85, max_news_age_s: 600}
-  etf:            {hold_s: 3600, stop_pct: 1.5,  tp_pct: 2.0,  risk_pct: 0.5,  max_lev: 2, min_conf: 0.85, max_news_age_s: 600}
-  regulatory:     {hold_s: 3600, stop_pct: 1.5,  tp_pct: 2.0,  risk_pct: 0.5,  max_lev: 2, min_conf: 0.85, max_news_age_s: 600}
-  tariff:         {hold_s: 3600, stop_pct: 1.5,  tp_pct: 2.5,  risk_pct: 0.6,  max_lev: 2, min_conf: 0.8, max_news_age_s: 600}
-  trump_policy:   {hold_s: 3600, stop_pct: 1.5,  tp_pct: 2.5,  risk_pct: 0.6,  max_lev: 2, min_conf: 0.8, max_news_age_s: 600}
   listing_hl:     {hold_s: 600,  stop_pct: 3.0,  tp_pct: 4.0,  risk_pct: 0.3,  max_lev: 2, min_conf: 0.9, max_news_age_s: 60}
-  earnings:       {hold_s: 7200, stop_pct: 2.0,  tp_pct: 3.0,  risk_pct: 0.6,  max_lev: 3, min_conf: 0.8, max_news_age_s: 1800}
-  guidance:       {hold_s: 7200, stop_pct: 2.0,  tp_pct: 3.0,  risk_pct: 0.6,  max_lev: 3, min_conf: 0.8, max_news_age_s: 1800}
-  # Sector supply news diffuses slowly (Toshiba HDD 2026-10-01: Nikkei 21:59 UTC, first leg on HL 10:50 UTC next day,
-  # -13% by the US open). Hold must span the next US session. Alert-only until you have decided to trade it.
-  supply_expansion: {hold_s: 64800, stop_pct: 3.0, tp_pct: 5.0, risk_pct: 0.5, max_lev: 2, min_conf: 0.7, alert: true, trade: false, max_news_age_s: 14400}
-  supply_cut:       {hold_s: 64800, stop_pct: 3.0, tp_pct: 5.0, risk_pct: 0.5, max_lev: 2, min_conf: 0.7, alert: true, trade: false, max_news_age_s: 14400}
-  # m_and_a: intentionally no template. Rules cannot tell acquirer from target; LLM lane output for this class is logged only.
+  # NewsLiquid lanes (one per engineType; news is split into crypto and trade.xyz stock perps)
+  nl_news:        {hold_s: 3600, stop_pct: 1.5,  tp_pct: 2.5,  risk_pct: 0.5,  max_lev: 2, min_conf: 0.8, alert: true, max_news_age_s: 300}
+  nl_news_stock:  {hold_s: 7200, stop_pct: 2.0,  tp_pct: 3.0,  risk_pct: 0.5,  max_lev: 2, min_conf: 0.8, alert: true, max_news_age_s: 1800}
+  # Exchange listings almost never hit this universe (BTC/ETH cannot be "listed"); alert-only until you widen the universe.
+  nl_listing:     {hold_s: 600,  stop_pct: 3.0,  tp_pct: 4.0,  risk_pct: 0.3,  max_lev: 2, min_conf: 0.85, alert: true, trade: false, max_news_age_s: 120}
+  # nl_market / nl_onchain / nl_meme / nl_prediction: no template -> never traded even if subscribed in engine_types.
 
 storage:
   sqlite_path: data/hlnews.db

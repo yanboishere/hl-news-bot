@@ -137,7 +137,7 @@ struct SettingsView: View {
                 }
             }
             Section {
-                Text("实盘密钥不在这里填。把 HL_AGENT_KEY、HL_ACCOUNT（以及可选的 ANTHROPIC_API_KEY）写进仓库目录下的 .env 文件，应用启动服务时会读取它并传给 bot 进程。.env 已在 .gitignore 里。")
+                Text("密钥不在这里填。把 OPENNEWS_TOKEN（NewsLiquid，新闻来源，必需）以及实盘用的 HL_AGENT_KEY、HL_ACCOUNT 写进仓库目录下的 .env 文件，应用启动服务时会读取它并传给 bot 进程。.env 已在 .gitignore 里。")
                     .font(.system(size: 12)).foregroundStyle(.secondary)
             }
         }
